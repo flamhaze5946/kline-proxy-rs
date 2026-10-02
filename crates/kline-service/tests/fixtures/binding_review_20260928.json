@@ -1,0 +1,814 @@
+[
+  {
+    "name": "dup-complete-interval-limit-closed_only-symbols-interval",
+    "body": "{\"interval\":\"1h\",\"limit\":2,\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-interval-limit-closed_only-symbols-limit",
+    "body": "{\"interval\":\"1h\",\"limit\":2,\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-interval-limit-closed_only-symbols-closed_only",
+    "body": "{\"interval\":\"1h\",\"limit\":2,\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-interval-limit-closed_only-symbols-symbols",
+    "body": "{\"interval\":\"1h\",\"limit\":2,\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-interval-limit-symbols-closed_only-interval",
+    "body": "{\"interval\":\"1h\",\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-interval-limit-symbols-closed_only-limit",
+    "body": "{\"interval\":\"1h\",\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-interval-limit-symbols-closed_only-closed_only",
+    "body": "{\"interval\":\"1h\",\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-interval-limit-symbols-closed_only-symbols",
+    "body": "{\"interval\":\"1h\",\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-interval-closed_only-limit-symbols-interval",
+    "body": "{\"interval\":\"1h\",\"closed_only\":true,\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-interval-closed_only-limit-symbols-limit",
+    "body": "{\"interval\":\"1h\",\"closed_only\":true,\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-interval-closed_only-limit-symbols-closed_only",
+    "body": "{\"interval\":\"1h\",\"closed_only\":true,\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-interval-closed_only-limit-symbols-symbols",
+    "body": "{\"interval\":\"1h\",\"closed_only\":true,\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-interval-closed_only-symbols-limit-interval",
+    "body": "{\"interval\":\"1h\",\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-interval-closed_only-symbols-limit-limit",
+    "body": "{\"interval\":\"1h\",\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-interval-closed_only-symbols-limit-closed_only",
+    "body": "{\"interval\":\"1h\",\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-interval-closed_only-symbols-limit-symbols",
+    "body": "{\"interval\":\"1h\",\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-interval-symbols-limit-closed_only-interval",
+    "body": "{\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"closed_only\":true,\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-interval-symbols-limit-closed_only-limit",
+    "body": "{\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"closed_only\":true,\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-interval-symbols-limit-closed_only-closed_only",
+    "body": "{\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"closed_only\":true,\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-interval-symbols-limit-closed_only-symbols",
+    "body": "{\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"closed_only\":true,\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-interval-symbols-closed_only-limit-interval",
+    "body": "{\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"limit\":2,\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-interval-symbols-closed_only-limit-limit",
+    "body": "{\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"limit\":2,\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-interval-symbols-closed_only-limit-closed_only",
+    "body": "{\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"limit\":2,\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-interval-symbols-closed_only-limit-symbols",
+    "body": "{\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"limit\":2,\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-interval-closed_only-symbols-interval",
+    "body": "{\"limit\":2,\"interval\":\"1h\",\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-interval-closed_only-symbols-limit",
+    "body": "{\"limit\":2,\"interval\":\"1h\",\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-interval-closed_only-symbols-closed_only",
+    "body": "{\"limit\":2,\"interval\":\"1h\",\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-interval-closed_only-symbols-symbols",
+    "body": "{\"limit\":2,\"interval\":\"1h\",\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-interval-symbols-closed_only-interval",
+    "body": "{\"limit\":2,\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-interval-symbols-closed_only-limit",
+    "body": "{\"limit\":2,\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-interval-symbols-closed_only-closed_only",
+    "body": "{\"limit\":2,\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-interval-symbols-closed_only-symbols",
+    "body": "{\"limit\":2,\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-closed_only-interval-symbols-interval",
+    "body": "{\"limit\":2,\"closed_only\":true,\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-closed_only-interval-symbols-limit",
+    "body": "{\"limit\":2,\"closed_only\":true,\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-closed_only-interval-symbols-closed_only",
+    "body": "{\"limit\":2,\"closed_only\":true,\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-closed_only-interval-symbols-symbols",
+    "body": "{\"limit\":2,\"closed_only\":true,\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-closed_only-symbols-interval-interval",
+    "body": "{\"limit\":2,\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-closed_only-symbols-interval-limit",
+    "body": "{\"limit\":2,\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-closed_only-symbols-interval-closed_only",
+    "body": "{\"limit\":2,\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-closed_only-symbols-interval-symbols",
+    "body": "{\"limit\":2,\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-symbols-interval-closed_only-interval",
+    "body": "{\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"closed_only\":true,\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-symbols-interval-closed_only-limit",
+    "body": "{\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"closed_only\":true,\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-symbols-interval-closed_only-closed_only",
+    "body": "{\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"closed_only\":true,\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-symbols-interval-closed_only-symbols",
+    "body": "{\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"closed_only\":true,\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-symbols-closed_only-interval-interval",
+    "body": "{\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"interval\":\"1h\",\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-symbols-closed_only-interval-limit",
+    "body": "{\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"interval\":\"1h\",\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-symbols-closed_only-interval-closed_only",
+    "body": "{\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"interval\":\"1h\",\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-limit-symbols-closed_only-interval-symbols",
+    "body": "{\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-interval-limit-symbols-interval",
+    "body": "{\"closed_only\":true,\"interval\":\"1h\",\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-interval-limit-symbols-limit",
+    "body": "{\"closed_only\":true,\"interval\":\"1h\",\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-interval-limit-symbols-closed_only",
+    "body": "{\"closed_only\":true,\"interval\":\"1h\",\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-interval-limit-symbols-symbols",
+    "body": "{\"closed_only\":true,\"interval\":\"1h\",\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-interval-symbols-limit-interval",
+    "body": "{\"closed_only\":true,\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-interval-symbols-limit-limit",
+    "body": "{\"closed_only\":true,\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-interval-symbols-limit-closed_only",
+    "body": "{\"closed_only\":true,\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-interval-symbols-limit-symbols",
+    "body": "{\"closed_only\":true,\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-limit-interval-symbols-interval",
+    "body": "{\"closed_only\":true,\"limit\":2,\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-limit-interval-symbols-limit",
+    "body": "{\"closed_only\":true,\"limit\":2,\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-limit-interval-symbols-closed_only",
+    "body": "{\"closed_only\":true,\"limit\":2,\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-limit-interval-symbols-symbols",
+    "body": "{\"closed_only\":true,\"limit\":2,\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"],\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-limit-symbols-interval-interval",
+    "body": "{\"closed_only\":true,\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-limit-symbols-interval-limit",
+    "body": "{\"closed_only\":true,\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-limit-symbols-interval-closed_only",
+    "body": "{\"closed_only\":true,\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-limit-symbols-interval-symbols",
+    "body": "{\"closed_only\":true,\"limit\":2,\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-symbols-interval-limit-interval",
+    "body": "{\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"limit\":2,\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-symbols-interval-limit-limit",
+    "body": "{\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"limit\":2,\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-symbols-interval-limit-closed_only",
+    "body": "{\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"limit\":2,\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-symbols-interval-limit-symbols",
+    "body": "{\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"limit\":2,\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-symbols-limit-interval-interval",
+    "body": "{\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"interval\":\"1h\",\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-symbols-limit-interval-limit",
+    "body": "{\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"interval\":\"1h\",\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-symbols-limit-interval-closed_only",
+    "body": "{\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"interval\":\"1h\",\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-closed_only-symbols-limit-interval-symbols",
+    "body": "{\"closed_only\":true,\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-interval-limit-closed_only-interval",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"limit\":2,\"closed_only\":true,\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-interval-limit-closed_only-limit",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"limit\":2,\"closed_only\":true,\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-interval-limit-closed_only-closed_only",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"limit\":2,\"closed_only\":true,\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-interval-limit-closed_only-symbols",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"limit\":2,\"closed_only\":true,\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-interval-closed_only-limit-interval",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"closed_only\":true,\"limit\":2,\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-interval-closed_only-limit-limit",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"closed_only\":true,\"limit\":2,\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-interval-closed_only-limit-closed_only",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"closed_only\":true,\"limit\":2,\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-interval-closed_only-limit-symbols",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"interval\":\"1h\",\"closed_only\":true,\"limit\":2,\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-limit-interval-closed_only-interval",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"interval\":\"1h\",\"closed_only\":true,\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-limit-interval-closed_only-limit",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"interval\":\"1h\",\"closed_only\":true,\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-limit-interval-closed_only-closed_only",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"interval\":\"1h\",\"closed_only\":true,\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-limit-interval-closed_only-symbols",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"interval\":\"1h\",\"closed_only\":true,\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-limit-closed_only-interval-interval",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"closed_only\":true,\"interval\":\"1h\",\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-limit-closed_only-interval-limit",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"closed_only\":true,\"interval\":\"1h\",\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-limit-closed_only-interval-closed_only",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"closed_only\":true,\"interval\":\"1h\",\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-limit-closed_only-interval-symbols",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"limit\":2,\"closed_only\":true,\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-closed_only-interval-limit-interval",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"interval\":\"1h\",\"limit\":2,\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-closed_only-interval-limit-limit",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"interval\":\"1h\",\"limit\":2,\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-closed_only-interval-limit-closed_only",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"interval\":\"1h\",\"limit\":2,\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-closed_only-interval-limit-symbols",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"interval\":\"1h\",\"limit\":2,\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-closed_only-limit-interval-interval",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"limit\":2,\"interval\":\"1h\",\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-closed_only-limit-interval-limit",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"limit\":2,\"interval\":\"1h\",\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-closed_only-limit-interval-closed_only",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"limit\":2,\"interval\":\"1h\",\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-complete-symbols-closed_only-limit-interval-symbols",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"closed_only\":true,\"limit\":2,\"interval\":\"1h\",\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-before-complete-interval-\"bad\"",
+    "body": "{\"interval\":\"bad\",\"interval\":\"1h\"}",
+    "status": "ok",
+    "value": {
+      "interval": "1h"
+    }
+  },
+  {
+    "name": "dup-before-complete-interval-null",
+    "body": "{\"interval\":null,\"interval\":\"1h\"}",
+    "status": "ok",
+    "value": {
+      "interval": "1h"
+    }
+  },
+  {
+    "name": "dup-before-complete-interval-{}",
+    "body": "{\"interval\":{},\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-before-complete-interval-[]",
+    "body": "{\"interval\":[],\"interval\":\"1h\"}",
+    "status": "error"
+  },
+  {
+    "name": "dup-before-complete-interval-1e999",
+    "body": "{\"interval\":1e999,\"interval\":\"1h\"}",
+    "status": "ok",
+    "value": {
+      "interval": "1h"
+    }
+  },
+  {
+    "name": "dup-before-complete-interval-\"1h\"",
+    "body": "{\"interval\":\"1h\",\"interval\":\"1h\"}",
+    "status": "ok",
+    "value": {
+      "interval": "1h"
+    }
+  },
+  {
+    "name": "dup-before-complete-limit-\"bad\"",
+    "body": "{\"limit\":\"bad\",\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-before-complete-limit-null",
+    "body": "{\"limit\":null,\"limit\":2}",
+    "status": "ok",
+    "value": {
+      "limit": 2
+    }
+  },
+  {
+    "name": "dup-before-complete-limit-{}",
+    "body": "{\"limit\":{},\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-before-complete-limit-[]",
+    "body": "{\"limit\":[],\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-before-complete-limit-1e999",
+    "body": "{\"limit\":1e999,\"limit\":2}",
+    "status": "error"
+  },
+  {
+    "name": "dup-before-complete-limit-2",
+    "body": "{\"limit\":2,\"limit\":2}",
+    "status": "ok",
+    "value": {
+      "limit": 2
+    }
+  },
+  {
+    "name": "dup-before-complete-closed_only-\"bad\"",
+    "body": "{\"closed_only\":\"bad\",\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-before-complete-closed_only-null",
+    "body": "{\"closed_only\":null,\"closed_only\":true}",
+    "status": "ok",
+    "value": {
+      "closed_only": true
+    }
+  },
+  {
+    "name": "dup-before-complete-closed_only-{}",
+    "body": "{\"closed_only\":{},\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-before-complete-closed_only-[]",
+    "body": "{\"closed_only\":[],\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-before-complete-closed_only-1e999",
+    "body": "{\"closed_only\":1e999,\"closed_only\":true}",
+    "status": "error"
+  },
+  {
+    "name": "dup-before-complete-closed_only-true",
+    "body": "{\"closed_only\":true,\"closed_only\":true}",
+    "status": "ok",
+    "value": {
+      "closed_only": true
+    }
+  },
+  {
+    "name": "dup-before-complete-symbols-\"bad\"",
+    "body": "{\"symbols\":\"bad\",\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-before-complete-symbols-null",
+    "body": "{\"symbols\":null,\"symbols\":[\"BTCUSDT\"]}",
+    "status": "ok",
+    "value": {
+      "symbols": [
+        "BTCUSDT"
+      ]
+    }
+  },
+  {
+    "name": "dup-before-complete-symbols-{}",
+    "body": "{\"symbols\":{},\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-before-complete-symbols-[]",
+    "body": "{\"symbols\":[],\"symbols\":[\"BTCUSDT\"]}",
+    "status": "ok",
+    "value": {
+      "symbols": [
+        "BTCUSDT"
+      ]
+    }
+  },
+  {
+    "name": "dup-before-complete-symbols-1e999",
+    "body": "{\"symbols\":1e999,\"symbols\":[\"BTCUSDT\"]}",
+    "status": "error"
+  },
+  {
+    "name": "dup-before-complete-symbols-[\"BTCUSDT\"]",
+    "body": "{\"symbols\":[\"BTCUSDT\"],\"symbols\":[\"BTCUSDT\"]}",
+    "status": "ok",
+    "value": {
+      "symbols": [
+        "BTCUSDT"
+      ]
+    }
+  },
+  {
+    "name": "number-interval-999-",
+    "body": "{\"interval\":111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111}",
+    "status": "ok",
+    "value": {
+      "interval": "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+    }
+  },
+  {
+    "name": "number-interval-999-e0",
+    "body": "{\"interval\":111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111e0}",
+    "status": "ok",
+    "value": {
+      "interval": "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111e0"
+    }
+  },
+  {
+    "name": "number-interval-999-.0",
+    "body": "{\"interval\":111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111.0}",
+    "status": "ok",
+    "value": {
+      "interval": "111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111.0"
+    }
+  },
+  {
+    "name": "number-closed_only-999-",
+    "body": "{\"closed_only\":111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111}",
+    "status": "ok",
+    "value": {
+      "closed_only": true
+    }
+  },
+  {
+    "name": "number-closed_only-999-e0",
+    "body": "{\"closed_only\":111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111e0}",
+    "status": "error"
+  },
+  {
+    "name": "number-closed_only-999-.0",
+    "body": "{\"closed_only\":111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111.0}",
+    "status": "error"
+  },
+  {
+    "name": "number-unknown-999-",
+    "body": "{\"unknown\":111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111}",
+    "status": "ok",
+    "value": {}
+  },
+  {
+    "name": "number-unknown-999-e0",
+    "body": "{\"unknown\":111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111e0}",
+    "status": "ok",
+    "value": {}
+  },
+  {
+    "name": "number-unknown-999-.0",
+    "body": "{\"unknown\":111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111.0}",
+    "status": "ok",
+    "value": {}
+  },
+  {
+    "name": "number-interval-1000-",
+    "body": "{\"interval\":1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111}",
+    "status": "ok",
+    "value": {
+      "interval": "1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+    }
+  },
+  {
+    "name": "number-interval-1000-e0",
+    "body": "{\"interval\":1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111e0}",
+    "status": "error"
+  },
+  {
+    "name": "number-interval-1000-.0",
+    "body": "{\"interval\":1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111.0}",
+    "status": "error"
+  },
+  {
+    "name": "number-closed_only-1000-",
+    "body": "{\"closed_only\":1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111}",
+    "status": "ok",
+    "value": {
+      "closed_only": true
+    }
+  },
+  {
+    "name": "number-closed_only-1000-e0",
+    "body": "{\"closed_only\":1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111e0}",
+    "status": "error"
+  },
+  {
+    "name": "number-closed_only-1000-.0",
+    "body": "{\"closed_only\":1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111.0}",
+    "status": "error"
+  },
+  {
+    "name": "number-unknown-1000-",
+    "body": "{\"unknown\":1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111}",
+    "status": "ok",
+    "value": {}
+  },
+  {
+    "name": "number-unknown-1000-e0",
+    "body": "{\"unknown\":1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111e0}",
+    "status": "error"
+  },
+  {
+    "name": "number-unknown-1000-.0",
+    "body": "{\"unknown\":1111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111.0}",
+    "status": "error"
+  },
+  {
+    "name": "number-interval-1001-",
+    "body": "{\"interval\":11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111}",
+    "status": "error"
+  },
+  {
+    "name": "number-interval-1001-e0",
+    "body": "{\"interval\":11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111e0}",
+    "status": "error"
+  },
+  {
+    "name": "number-interval-1001-.0",
+    "body": "{\"interval\":11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111.0}",
+    "status": "error"
+  },
+  {
+    "name": "number-closed_only-1001-",
+    "body": "{\"closed_only\":11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111}",
+    "status": "error"
+  },
+  {
+    "name": "number-closed_only-1001-e0",
+    "body": "{\"closed_only\":11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111e0}",
+    "status": "error"
+  },
+  {
+    "name": "number-closed_only-1001-.0",
+    "body": "{\"closed_only\":11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111.0}",
+    "status": "error"
+  },
+  {
+    "name": "number-unknown-1001-",
+    "body": "{\"unknown\":11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111}",
+    "status": "error"
+  },
+  {
+    "name": "number-unknown-1001-e0",
+    "body": "{\"unknown\":11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111e0}",
+    "status": "error"
+  },
+  {
+    "name": "number-unknown-1001-.0",
+    "body": "{\"unknown\":11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111.0}",
+    "status": "error"
+  },
+  {
+    "name": "string-escaped-big",
+    "body": "{\"interval\": \"\\\\\\\"111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111\"}",
+    "status": "ok",
+    "value": {
+      "interval": "\\\"111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111"
+    }
+  },
+  {
+    "name": "trailing-big-number",
+    "body": "{\"interval\":\"1h\"} 11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111",
+    "status": "ok",
+    "value": {
+      "interval": "1h"
+    }
+  }
+]

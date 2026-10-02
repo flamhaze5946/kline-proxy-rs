@@ -1,0 +1,103 @@
+{
+  "listen": "127.0.0.1:1889",
+  "final_wait_ms": 8000,
+  "subscriptions": [
+    {
+      "market": "future",
+      "interval": "1h",
+      "history_capacity": 9000,
+      "symbol_capacities": {},
+      "symbol_patterns": [
+        ".*?USDT"
+      ],
+      "continuous": false
+    },
+    {
+      "market": "future",
+      "interval": "1d",
+      "history_capacity": 2000,
+      "symbol_capacities": {},
+      "symbol_patterns": [
+        ".*?USDT"
+      ],
+      "continuous": false
+    },
+    {
+      "market": "spot",
+      "interval": "1h",
+      "history_capacity": 18000,
+      "symbol_capacities": {
+        "BTCUSDT": 20000
+      },
+      "symbol_patterns": [
+        ".*?USDT"
+      ],
+      "continuous": false
+    },
+    {
+      "market": "spot",
+      "interval": "1d",
+      "history_capacity": 2000,
+      "symbol_capacities": {},
+      "symbol_patterns": [
+        ".*?USDT"
+      ],
+      "continuous": false
+    }
+  ],
+  "rest": {
+    "future_url": "https://fapi.binance.com",
+    "spot_url": "https://api.binance.com"
+  },
+  "market_api": {
+    "statistics": {
+      "atr_symbol": "BTCUSDT",
+      "atr_period": 48,
+      "start_date": "2021-01-01",
+      "days": 30,
+      "volume_days": 7,
+      "volume_rank": 20
+    }
+  },
+  "websocket": {
+    "future_url": "wss://fstream.binance.com/market/stream",
+    "spot_url": "wss://stream.binance.com/stream"
+  },
+  "persistence": {
+    "directory": "/var/lib/kline-proxy-rs",
+    "legacy_directory": "/opt/kline-proxy/data/kline-cache",
+    "load_on_startup": true,
+    "dump_on_shutdown": true,
+    "interval_seconds": 300,
+    "boundary_guard_before_ms": 30000,
+    "boundary_guard_after_ms": 30000,
+    "retention": [
+      {
+        "market": "future",
+        "interval": "1h",
+        "max_store_count": 9000,
+        "symbol_counts": {}
+      },
+      {
+        "market": "future",
+        "interval": "1d",
+        "max_store_count": 2000,
+        "symbol_counts": {}
+      },
+      {
+        "market": "spot",
+        "interval": "1h",
+        "max_store_count": 18000,
+        "symbol_counts": {
+          "BTCUSDT": 20000
+        }
+      },
+      {
+        "market": "spot",
+        "interval": "1d",
+        "max_store_count": 2000,
+        "symbol_counts": {}
+      }
+    ]
+  }
+}

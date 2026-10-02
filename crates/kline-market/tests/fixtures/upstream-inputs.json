@@ -1,0 +1,122 @@
+[
+  {
+    "name": "success",
+    "status": 200,
+    "body": "[]",
+    "typed": false
+  },
+  {
+    "name": "null",
+    "status": 200,
+    "body": "null",
+    "typed": false
+  },
+  {
+    "name": "null-spaces",
+    "status": 200,
+    "body": " \nnull\t",
+    "typed": false
+  },
+  {
+    "name": "empty200",
+    "status": 200,
+    "body": "",
+    "typed": false
+  },
+  {
+    "name": "empty204",
+    "status": 204,
+    "body": "",
+    "typed": false
+  },
+  {
+    "name": "empty205",
+    "status": 205,
+    "body": "",
+    "typed": false
+  },
+  {
+    "name": "invalid-json",
+    "status": 200,
+    "body": "{",
+    "typed": false
+  },
+  {
+    "name": "trailing-json",
+    "status": 200,
+    "body": "[] {}",
+    "typed": false
+  },
+  {
+    "name": "error-json",
+    "status": 400,
+    "body": "{\"code\":-1121,\"msg\":\"Invalid symbol.\"}",
+    "typed": false
+  },
+  {
+    "name": "error-json-extra",
+    "status": 400,
+    "body": "{\"code\":-1121,\"msg\":\"Invalid symbol.\",\"extra\":1}",
+    "typed": false
+  },
+  {
+    "name": "error-json-missing",
+    "status": 400,
+    "body": "{\"msg\":\"Oops\"}",
+    "typed": false
+  },
+  {
+    "name": "error-null",
+    "status": 400,
+    "body": "null",
+    "typed": false
+  },
+  {
+    "name": "error-array",
+    "status": 400,
+    "body": "[]",
+    "typed": false
+  },
+  {
+    "name": "error-raw",
+    "status": 400,
+    "body": "bad gateway upstream",
+    "typed": false
+  },
+  {
+    "name": "error-empty",
+    "status": 400,
+    "body": "",
+    "typed": false
+  },
+  {
+    "name": "throttled",
+    "status": 429,
+    "body": "{\"code\":-1003,\"msg\":\"Too many requests.\"}",
+    "typed": false
+  },
+  {
+    "name": "ban",
+    "status": 418,
+    "body": "IP banned",
+    "typed": false
+  },
+  {
+    "name": "server",
+    "status": 503,
+    "body": "maintenance",
+    "typed": false
+  },
+  {
+    "name": "typed-object",
+    "status": 200,
+    "body": "{}",
+    "typed": true
+  },
+  {
+    "name": "connection-closed",
+    "status": 200,
+    "body": "",
+    "disconnect": true
+  }
+]

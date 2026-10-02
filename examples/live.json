@@ -1,0 +1,22 @@
+{
+  "listen": "127.0.0.1:8081",
+  "history_capacity": 1000,
+  "instruments": [
+    {"market":"future","symbol":"BTCUSDT","pair":"BTCUSDT","contract_type":"PERPETUAL","intervals":["1h","1d"]},
+    {"market":"spot","symbol":"BTCUSDT","intervals":["1h","1d"]}
+  ],
+  "rest": {
+    "weight_per_minute": 1200,
+    "workers": 4,
+    "reconcile_seconds": 60,
+    "boundary_guard_before_ms": 3000,
+    "boundary_guard_after_ms": 10000,
+    "sync_clock": true
+  },
+  "persistence": {
+    "directory": "../data/kline-cache",
+    "interval_seconds": 300,
+    "boundary_guard_before_ms": 30000,
+    "boundary_guard_after_ms": 30000
+  }
+}

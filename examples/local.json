@@ -1,0 +1,10 @@
+{
+  "listen": "127.0.0.1:8081",
+  "history_capacity": 1000,
+  "instruments": [
+    {"market":"future","symbol":"BTCUSDT","pair":"BTCUSDT","contract_type":"PERPETUAL","intervals":["1h"]},
+    {"market":"spot","symbol":"BTCUSDT","intervals":["1h"]}
+  ],
+  "streams": [],
+  "seed": "seed.jsonl"
+}

@@ -1,0 +1,54 @@
+[workspace]
+members = ["crates/kline-core", "crates/binance-wire", "crates/kline-service", "crates/kline-runtime", "crates/kline-market"]
+resolver = "3"
+
+[workspace.package]
+version = "0.4.22"
+edition = "2024"
+rust-version = "1.92"
+license = "UNLICENSED"
+publish = false
+
+[workspace.dependencies]
+kline-core = { path = "crates/kline-core" }
+kline-service = { path = "crates/kline-service" }
+binance-wire = { path = "crates/binance-wire" }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal", "test-util"] }
+parking_lot = "0.12"
+thiserror = "2"
+bytes = "1"
+arrayvec = "0.7"
+futures-util = { version = "0.3", features = ["sink"] }
+axum = "0.8"
+tokio-tungstenite = { version = "0.28", features = ["rustls-tls-webpki-roots"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "stream"] }
+sha2 = "0.10"
+tempfile = "3"
+kline-market = { path = "crates/kline-market" }
+arc-swap = "1.9"
+regex = "1"
+moka = { version = "0.12", features = ["future"] }
+chrono = { version = "0.4", features = ["serde"] }
+bigdecimal = "0.4"
+num-traits = "0.2"
+png = "0.17"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "bitmap_encoder", "line_series", "ab_glyph", "chrono"] }
+
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = 1
+strip = "none"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+await_holding_lock = "deny"

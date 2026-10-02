@@ -1,0 +1,29 @@
+[Unit]
+Description=Rust Kline proxy (separate service)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kline-rs
+Group=kline-rs
+WorkingDirectory=/opt/kline-proxy-rs
+ExecStart=/opt/kline-proxy-rs/current/kline-proxy /etc/kline-proxy-rs/config.json
+Environment=RUST_LOG=info
+Environment=KLINE_IO_WORKERS=2
+Restart=on-failure
+# Each start reconnects every upstream WebSocket. Attempts are recorded in /var/lib/kline-proxy-rs
+# (ws-connect-attempts.json), so restarts share one five-minute allowance while that directory is
+# writable and this is the only instance (see docs/runtime.md); 30 s spaces crash loops.
+RestartSec=30
+TimeoutStopSec=90
+LimitNOFILE=65536
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/kline-proxy-rs
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

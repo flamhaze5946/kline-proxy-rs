@@ -1,0 +1,119 @@
+[ {
+  "name" : "success",
+  "status" : 200,
+  "body" : [ ],
+  "cooldown_callbacks" : 0
+}, {
+  "name" : "null",
+  "status" : 502,
+  "code" : -1000,
+  "msg" : "body from call is null.",
+  "cooldown_callbacks" : 0
+}, {
+  "name" : "null-spaces",
+  "status" : 502,
+  "code" : -1000,
+  "msg" : "body from call is null.",
+  "cooldown_callbacks" : 0
+}, {
+  "name" : "empty200",
+  "status" : 502,
+  "code" : -1001,
+  "msg" : "No content to map due to end-of-input\n at [Source: (okhttp3.ResponseBody$BomAwareReader); line: 1, column: 0]",
+  "cooldown_callbacks" : 0
+}, {
+  "name" : "empty204",
+  "status" : 502,
+  "code" : -1000,
+  "msg" : "body from call is null.",
+  "cooldown_callbacks" : 0
+}, {
+  "name" : "empty205",
+  "status" : 502,
+  "code" : -1000,
+  "msg" : "body from call is null.",
+  "cooldown_callbacks" : 0
+}, {
+  "name" : "invalid-json",
+  "status" : 502,
+  "code" : -1001,
+  "msg" : "Unexpected end-of-input: expected close marker for Object (start marker at [Source: (okhttp3.ResponseBody$BomAwareReader); line: 1, column: 1])\n at [Source: (okhttp3.ResponseBody$BomAwareReader); line: 1, column: 2]",
+  "cooldown_callbacks" : 0
+}, {
+  "name" : "trailing-json",
+  "status" : 200,
+  "body" : [ ],
+  "cooldown_callbacks" : 0
+}, {
+  "name" : "error-json",
+  "status" : 400,
+  "code" : 400,
+  "msg" : "{\"code\":-1121,\"msg\":\"Invalid symbol.\"}",
+  "cooldown_callbacks" : 0
+}, {
+  "name" : "error-json-extra",
+  "status" : 400,
+  "code" : 400,
+  "msg" : "{\"code\":-1121,\"msg\":\"Invalid symbol.\",\"extra\":1}",
+  "cooldown_callbacks" : 0
+}, {
+  "name" : "error-json-missing",
+  "status" : 400,
+  "code" : 400,
+  "msg" : "{\"msg\":\"Oops\"}",
+  "cooldown_callbacks" : 0
+}, {
+  "name" : "error-null",
+  "status" : 400,
+  "code" : 400,
+  "msg" : "null",
+  "cooldown_callbacks" : 0
+}, {
+  "name" : "error-array",
+  "status" : 400,
+  "code" : 400,
+  "msg" : "[]",
+  "cooldown_callbacks" : 0
+}, {
+  "name" : "error-raw",
+  "status" : 400,
+  "code" : 400,
+  "msg" : "bad gateway upstream",
+  "cooldown_callbacks" : 0
+}, {
+  "name" : "error-empty",
+  "status" : 400,
+  "code" : 400,
+  "msg" : "",
+  "cooldown_callbacks" : 0
+}, {
+  "name" : "throttled",
+  "status" : 429,
+  "code" : 429,
+  "msg" : "{\"code\":-1003,\"msg\":\"Too many requests.\"}",
+  "cooldown_callbacks" : 1
+}, {
+  "name" : "ban",
+  "status" : 418,
+  "code" : 418,
+  "msg" : "IP banned",
+  "cooldown_callbacks" : 1
+}, {
+  "name" : "server",
+  "status" : 503,
+  "code" : 503,
+  "msg" : "maintenance",
+  "cooldown_callbacks" : 0
+}, {
+  "name" : "typed-object",
+  "status" : 502,
+  "code" : -1001,
+  "msg" : "Cannot deserialize value of type `java.util.ArrayList<com.zx.quant.klineproxy.model.FutureFundingRate>` from Object value (token `JsonToken.START_OBJECT`)\n at [Source: (okhttp3.ResponseBody$BomAwareReader); line: 1, column: 1]",
+  "cooldown_callbacks" : 0
+}, {
+  "name" : "connection-closed",
+  "status" : 502,
+  "code" : -1001,
+  "msg" : "unexpected end of stream on http://127.0.0.1:52523/...",
+  "cooldown_callbacks" : 0
+} ]

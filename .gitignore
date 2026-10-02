@@ -1,0 +1,22 @@
+target/
+/research/
+/data/
+dist/
+__pycache__/
+*.jfr
+*.log
+.DS_Store
+.idea/
+
+# Compiled artifacts
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.rlib
+*.rmeta
+*.class
+*.pyc
+*.wasm

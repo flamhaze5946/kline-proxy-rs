@@ -1,0 +1,65 @@
+{
+  "listen": "127.0.0.1:1889",
+  "listen_backlog": 1024,
+  "final_wait_ms": 8000,
+  "subscriptions": [
+    {
+      "market": "future",
+      "interval": "1h",
+      "history_capacity": 9000,
+      "symbol_capacities": {},
+      "symbol_patterns": [
+        ".*?USDT"
+      ],
+      "continuous": false
+    },
+    {
+      "market": "future",
+      "interval": "1d",
+      "history_capacity": 1000,
+      "symbol_capacities": {},
+      "symbol_patterns": [
+        ".*?USDT"
+      ],
+      "continuous": false
+    },
+    {
+      "market": "spot",
+      "interval": "1h",
+      "history_capacity": 9000,
+      "symbol_capacities": {},
+      "symbol_patterns": [
+        ".*?USDT"
+      ],
+      "continuous": false
+    },
+    {
+      "market": "spot",
+      "interval": "1d",
+      "history_capacity": 1000,
+      "symbol_capacities": {},
+      "symbol_patterns": [
+        ".*?USDT"
+      ],
+      "continuous": false
+    }
+  ],
+  "rest": {
+    "future_url": "https://fapi.binance.com",
+    "spot_url": "https://api.binance.com"
+  },
+  "market_api": {
+    "statistics": {
+      "atr_symbol": "BTCUSDT",
+      "atr_period": 48,
+      "start_date": "2021-01-01",
+      "days": 30,
+      "volume_days": 7,
+      "volume_rank": 20
+    }
+  },
+  "websocket": {
+    "future_url": "wss://fstream.binance.com/market/stream",
+    "spot_url": "wss://stream.binance.com/stream"
+  }
+}
