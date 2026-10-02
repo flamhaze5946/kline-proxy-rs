@@ -13,6 +13,9 @@ pub struct Settings {
     /// A closed_only bulk request arriving at most this long before an interval boundary waits
     /// for the boundary (0 disables; capped at 1 s).
     pub pre_boundary_wait_ms: u64,
+    /// Bulk decides its interval boundary by the later of this host's clock and the server-time
+    /// estimate, so an estimate running behind cannot answer for the period before.
+    pub host_clock_floor: bool,
     pub cache_bytes: usize,
     pub concurrent_builds: usize,
     /// Distinct bulk keys that may be in flight (waiting for finals or building) at once.
@@ -38,6 +41,7 @@ impl Default for Settings {
             closed_bar_latency_enabled: true,
             final_wait_ms: 8_000,
             pre_boundary_wait_ms: 250,
+            host_clock_floor: true,
             cache_bytes: 64 * 1024 * 1024,
             concurrent_builds: 2,
             inflight_limit: 256,

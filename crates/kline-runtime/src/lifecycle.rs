@@ -41,6 +41,9 @@ impl Clock for SyncedClock {
         }
         .now_ms()
     }
+    fn host_ms(&self) -> i64 {
+        SystemClock { offset_ms: 0 }.now_ms()
+    }
 }
 #[derive(Clone)]
 pub struct Feed {

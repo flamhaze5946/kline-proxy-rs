@@ -84,3 +84,25 @@ fn the_pre_boundary_wait_defaults_to_javas_250_ms_and_can_be_disabled() {
             .unwrap();
     assert_eq!(config.engine_settings().unwrap().pre_boundary_wait_ms, 0);
 }
+
+#[test]
+fn the_bulk_host_clock_floor_defaults_on_and_can_be_disabled() {
+    let config: Config = serde_json::from_value(json!({"listen": "127.0.0.1:0"})).unwrap();
+    assert!(config.engine_settings().unwrap().host_clock_floor);
+    let config: Config =
+        serde_json::from_value(json!({"listen": "127.0.0.1:0", "bulk_host_clock_floor": false}))
+            .unwrap();
+    assert!(!config.engine_settings().unwrap().host_clock_floor);
+}
+
+#[test]
+fn the_synced_clock_reports_this_hosts_clock_apart_from_its_estimate() {
+    use kline_service::Clock;
+    let clock = kline_runtime::lifecycle::SyncedClock::new(-400);
+    let estimate = clock.now_ms();
+    let host = clock.host_ms();
+    assert!(
+        (400..1_400).contains(&(host - estimate)),
+        "{host} - {estimate}"
+    );
+}

@@ -36,6 +36,10 @@ pub struct Config {
     /// for it (absent: 250; 0 disables), as Java's kline.bulk.preBoundaryWaitMs.
     #[serde(default)]
     pub bulk_pre_boundary_wait_ms: Option<u64>,
+    /// Bulk decides its interval boundary by the later of this host's clock and the server-time
+    /// estimate (absent: on; false: the estimate alone), as the Java proxy's bulk fix.
+    #[serde(default = "yes")]
+    pub bulk_host_clock_floor: bool,
     /// Concurrent requests per HTTP route group; further requests queue for a place.
     #[serde(default = "http_concurrency_default")]
     pub http_concurrency_limit: usize,
@@ -242,6 +246,7 @@ impl Config {
             admission_queue: self.bulk_admission_queue,
             admission_wait_ms: self.bulk_admission_wait_ms.unwrap_or(self.final_wait_ms),
             pre_boundary_wait_ms: self.bulk_pre_boundary_wait_ms.unwrap_or(250),
+            host_clock_floor: self.bulk_host_clock_floor,
             http_concurrency_limit: self.http_concurrency_limit,
             http_admission_queue: self.http_admission_queue,
             http_admission_wait_ms: self.http_admission_wait_ms.unwrap_or(self.final_wait_ms),

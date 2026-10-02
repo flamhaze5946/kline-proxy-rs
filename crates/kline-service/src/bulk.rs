@@ -103,6 +103,17 @@ struct Wait {
 }
 
 impl Engine {
+    /// The time bulk decides its boundary by: with `host_clock_floor`, never earlier than this
+    /// host's own clock, so a server-time estimate running behind cannot keep a request in the
+    /// period before. Nothing outside bulk uses it.
+    fn bulk_now_ms(&self) -> i64 {
+        let estimate = self.clock.now_ms();
+        if self.settings.host_clock_floor {
+            estimate.max(self.clock.host_ms())
+        } else {
+            estimate
+        }
+    }
     fn payload_current(&self, key: &Key, payload: &Payload, now: i64) -> bool {
         let slots = self.catalog.slots();
         now < payload.valid_until
@@ -151,8 +162,7 @@ impl Engine {
         let mut boundary_deadline: Option<(i64, Instant)> = None;
         let mut attempts = 0;
         while attempts < 4 {
-            let now =
-                not_before.map_or_else(|| self.clock.now_ms(), |b| self.clock.now_ms().max(b));
+            let now = not_before.map_or_else(|| self.bulk_now_ms(), |b| self.bulk_now_ms().max(b));
             let key = Key {
                 market: query.market,
                 interval,
@@ -253,9 +263,9 @@ impl Engine {
             attempts += 1;
             // A correction may race an in-flight build. Never let a later caller
             // inherit the completed old generation through the single-flight cell.
-            if (!key.closed_only && !self.reply_current(&key, &reply, self.now_ms()))
+            if (!key.closed_only && !self.reply_current(&key, &reply, self.bulk_now_ms()))
                 || reply.payload.as_ref().is_some_and(|p| {
-                    !self.payload_current(&key, p, self.now_ms().max(key.boundary))
+                    !self.payload_current(&key, p, self.bulk_now_ms().max(key.boundary))
                 })
             {
                 continue;
@@ -277,7 +287,7 @@ impl Engine {
         {
             return None;
         }
-        let now = self.clock.now_ms();
+        let now = self.bulk_now_ms();
         let next = interval.boundary(now) + interval.millis();
         let early = (next - now) as u64;
         if early > limit {
@@ -356,7 +366,7 @@ impl Engine {
     ) -> Result<BulkReply, ServiceError> {
         // Never before the key's boundary: after a pre-boundary wait the clock may still read a
         // moment short of it, and the bars that closed at the boundary must count as closed.
-        let now = self.clock.now_ms().max(key.boundary);
+        let now = self.bulk_now_ms().max(key.boundary);
         let mut stable = key.closed_only;
         let mut forming_generations = Vec::new();
         let mut forming_valid_until = i64::MAX;

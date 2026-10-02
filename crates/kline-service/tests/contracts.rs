@@ -1472,6 +1472,129 @@ async fn the_pre_boundary_wait_can_be_turned_off() {
     assert_eq!(json(&reply)["klines"]["A"][0][0], 0);
 }
 
+/// A server-time estimate running `lag` ms behind this host's clock.
+struct LaggingClock {
+    host: AtomicI64,
+    lag: i64,
+}
+impl Clock for LaggingClock {
+    fn now_ms(&self) -> i64 {
+        self.host.load(Ordering::Relaxed) - self.lag
+    }
+    fn host_ms(&self) -> i64 {
+        self.host.load(Ordering::Relaxed)
+    }
+}
+/// Hour [0, H) final, hour [H, 2H) still forming. This host's clock reads `host`, the estimate
+/// 400 ms behind it: further from the boundary 2H than the 250 ms pre-boundary wait.
+fn estimate_behind_the_host(host: i64, host_clock_floor: bool) -> Arc<Engine> {
+    let clock = Arc::new(LaggingClock {
+        host: AtomicI64::new(host),
+        lag: 400,
+    });
+    let instruments = vec![Instrument {
+        market: Market::Future,
+        symbol: "A".into(),
+        interval: Interval::parse("1h").unwrap(),
+        trading: true,
+        continuous: None,
+        capacity: NonZeroUsize::new(1000).unwrap(),
+    }];
+    let engine = Engine::new(
+        Catalog::new(instruments).unwrap(),
+        clock,
+        Settings {
+            final_wait_ms: 5_000,
+            host_clock_floor,
+            ..Settings::default()
+        },
+    );
+    commit(&engine, 0, 0, true, 1, 100.);
+    commit(&engine, 0, H, false, 2, 200.);
+    engine
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_request_just_after_the_boundary_is_not_held_back_by_a_lagging_estimate() {
+    let engine = estimate_behind_the_host(2 * H + 5, true);
+    let request = spawn(&engine, &["A"]);
+    settle(|| engine.cache_sizes().1 == 1).await;
+    // It waits for the final of the bar that closed at the boundary by this host's clock.
+    still_waiting(&request).await;
+    commit(&engine, 0, H, true, 3, 201.);
+    settle(|| request.is_finished()).await;
+    let reply = request.await.unwrap().unwrap();
+    assert!(reply.finalized);
+    assert_eq!(reply.boundary, 2 * H);
+    assert_eq!(json(&reply)["ts_ms"], 2 * H + 5);
+    let bar = &json(&reply)["klines"]["A"][0];
+    assert_eq!(
+        bar[0], H,
+        "the bar that closed at the boundary, not the hour before"
+    );
+    assert_eq!(bar[4], "201");
+    assert_eq!(engine.metrics.pre_boundary_waits.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_lagging_estimate_does_not_extend_the_final_wait_past_its_cap() {
+    let engine = estimate_behind_the_host(2 * H + 5, true);
+    let started = tokio::time::Instant::now();
+    let reply = engine.bulk(query(&["A"])).await.unwrap();
+    // The cap counts from the boundary by this host's clock, 5 ms ago.
+    assert_eq!(started.elapsed(), Duration::from_millis(4_995));
+    assert!(!reply.finalized);
+    assert_eq!(reply.boundary, 2 * H);
+    assert_eq!(json(&reply)["pending"], serde_json::json!(["A"]));
+}
+
+#[tokio::test(start_paused = true)]
+async fn the_pre_boundary_wait_goes_by_this_hosts_clock_too() {
+    let engine = estimate_behind_the_host(2 * H - 100, true);
+    let started = tokio::time::Instant::now();
+    let request = spawn(&engine, &["A"]);
+    for _ in 0..10 {
+        tokio::task::yield_now().await; // let it reach the sleep
+    }
+    assert_eq!(
+        engine.cache_sizes().1,
+        0,
+        "nothing registered before the boundary"
+    );
+    tokio::time::advance(Duration::from_millis(100)).await;
+    settle(|| engine.cache_sizes().1 == 1).await;
+    still_waiting(&request).await;
+    commit(&engine, 0, H, true, 3, 201.);
+    settle(|| request.is_finished()).await;
+    let reply = request.await.unwrap().unwrap();
+    assert!(reply.finalized);
+    assert_eq!(json(&reply)["klines"]["A"][0][0], H);
+    assert!(started.elapsed() >= Duration::from_millis(100));
+    assert_eq!(engine.metrics.pre_boundary_waits.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_forming_request_goes_by_this_hosts_clock_too() {
+    let engine = estimate_behind_the_host(2 * H + 5, true);
+    let mut forming = query(&["A"]);
+    forming.closed_only = false;
+    let reply = engine.bulk(forming).await.unwrap();
+    assert_eq!(reply.boundary, 2 * H);
+    assert_eq!(json(&reply)["ts_ms"], 2 * H + 5);
+}
+
+#[tokio::test(start_paused = true)]
+async fn without_the_host_clock_floor_a_lagging_estimate_answers_for_the_hour_before() {
+    let engine = estimate_behind_the_host(2 * H + 5, false);
+    let started = tokio::time::Instant::now();
+    let reply = engine.bulk(query(&["A"])).await.unwrap();
+    assert_eq!(started.elapsed(), Duration::ZERO);
+    assert!(reply.finalized);
+    assert_eq!(reply.boundary, H);
+    assert_eq!(json(&reply)["klines"]["A"][0][0], 0, "the hour before");
+    assert_eq!(engine.metrics.pre_boundary_waits.load(Ordering::Relaxed), 0);
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_queued_request_keeps_its_boundary_when_the_clock_steps_back() {
     let (engine, clock) = fixture_with(admission(1, 8, 5_000));
