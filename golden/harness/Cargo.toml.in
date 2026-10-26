@@ -1,0 +1,29 @@
+# Template: golden/run.sh writes Cargo.toml with @CHECKOUT@ replaced by the absolute path of the
+# kline-proxy-rs checkout under test. The harness is its own workspace and only uses public lib API.
+[package]
+name = "kp-golden-harness"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "kp-golden"
+path = "src/main.rs"
+
+[workspace]
+
+[dependencies]
+kline-core = { path = "@CHECKOUT@/crates/kline-core" }
+kline-service = { path = "@CHECKOUT@/crates/kline-service" }
+kline-runtime = { path = "@CHECKOUT@/crates/kline-runtime" }
+kline-market = { path = "@CHECKOUT@/crates/kline-market" }
+tokio = { version = "1.52", features = ["rt", "macros", "sync", "time", "net", "io-util", "test-util"] }
+axum = "0.8"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std", "fmt", "env-filter"] }
+sha2 = "0.10"
+blake3 = "1"
+anyhow = "1"

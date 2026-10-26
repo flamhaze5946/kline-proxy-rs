@@ -1,0 +1,4 @@
+{"added":2,"changed":true,"event":"discover","removed":0,"t":0}
+{"bars":0,"corrupt":0,"event":"restore","series":0,"t":0}
+{"event":"boot","series":2,"t":0}
+{"event":"shutdown","t":41000}
