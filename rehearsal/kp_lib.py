@@ -82,8 +82,9 @@ def evidence_url(base, limit, symbols=None):
 
 
 def evidence_post(base, limit, symbols, timeout=30.0):
-    """POST form of the evidence bulk: with_evidence on the URL, 0.4.24 JSON body unchanged."""
-    url = base.rstrip("/") + "/fapi/v1/klines/bulk?with_evidence=true"
+    """POST form of the evidence bulk, as the P3-S2 client sends it (P3-S3a schema v1 section 2.1):
+    POST /fapi/v1/klines/bulk?with_evidence=true&closed_only=true&limit=<n>, 0.4.24 JSON body."""
+    url = base.rstrip("/") + "/fapi/v1/klines/bulk?with_evidence=true&closed_only=true&limit=%d" % limit
     body = {"interval": "1m", "limit": limit, "closed_only": True}
     if symbols is not None:
         body["symbols"] = list(symbols)

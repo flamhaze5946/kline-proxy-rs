@@ -209,3 +209,57 @@ Open items for the orchestrator: (1) the config values I chose where §6 is sile
 itself: deploy only after 2026-10-27 11:35Z, then the 24 h recording, then the injection
 window (RUNBOOK). The config deviation is a JSON sample instead of `kp-1m.toml`, because
 the loader only reads JSON.
+
+---
+
+## §fix1 (2026-10-26, on top of f7b44f6; same clone, only `rehearsal/`; no git metadata, no VPS, no Binance)
+
+Where this section conflicts with the earlier ones (e.g. the old recording fields in §1/§3), this
+section wins. Authority for the format: `scratch/clones/p3-s3a/HANDOFF-P3-S3a.md` (§fix2 > §fix1 > §2) and
+`xtask/kline-oracle/src/kp_evidence.rs` (read only). Rulings applied: `final_wait_ms` 8000,
+`latest_repair_workers` 2, `listen` 1891 adopted; the rewritten asserts of scenarios 5/11
+(closed_only holds the bulk, no mid-minute pending) adopted; 6-W5 and 13 run in the rehearsal's
+night slot with the canonical 241-minute config, no extra binary.
+
+### Changes
+| File | Change |
+|---|---|
+| `recorder_evidence.py` | rewritten to schema v1. `bulk`: `schema`, `T`, `delta`, `with_evidence`, `limit`, `req_symbols` (exact non-empty list), `n_req`, `t_send_ms`, `elapsed_s`, `http_status`, exactly one of `resp_text` (raw body) / `error`; empty universe refuses to record. `rest_probe`: forms `end_m` / `start_time` / `cold_page`, `params` ints, `used_weight_1m`, `rows` / `error`. `proxy_stats`: per minute from 1 s `/health/ready` samples + passthrough `/stats` (definition in RUNBOOK "Recording format"). Only these three kinds are written to the top-level hourly files (the old `rest/` and `health/` subdirectories are gone) |
+| `kp_lib.py` | evidence POST URL is now `?with_evidence=true&closed_only=true&limit=<n>` (the P3-S2 client form, §2.1) |
+| `passthrough.py` | `GET /stats?from_ms=&to_ms=`: max X-MBX-USED-WEIGHT-1M relayed in the interval (source of `rest_used_weight_1m`) |
+| `repull.py` (new) | re-pull producer (fix1-6, fix2-L1): accepted absents from the `resp_text` bodies → one weight-1 request per consecutive run (±2 min, once ±30 min if a side lacks a row; runs split at UTC hours and at 35 minutes so limit ≤ 99), only for minutes whose UTC day has ended, endTime ≥ G+1m+300 ms asserted, `t_send_ms` always written, output `repull_<YYYYMMDDHH>.jsonl.gz` by proved hour; same-IP cap `--weight-cap` (120) with the kp + other + cap ≤ 1800 assertion; `--local-format-test` (loopback only) lifts the day-ended rule for a format check |
+| `summarize_rec.py` | reads schema v1 |
+| `install.sh` | stages `repull.py` |
+| `test_kit.py` | +2 tests: bulk record has exactly one of resp_text/error and rejects an empty req_symbols; repull run splitting and day end (13 tests) |
+| `RUNBOOK.md` | formal O7 order (§5: 24 h → Vision daily zips → EPYC `kline-1m-sync` every day incl. listed/delisted coins + audited repair → `repull.py` → `kp-evidence-compare` with no allow flags); exchangeInfo 5 s cold-start exit and its handling (§1 item 5); night slot for 6-W5 and 13 (§4); recording format replaced by the schema v1 description incl. the `proxy_stats` source |
+
+### Verification
+| Command | rc | Key output |
+|---|---|---|
+| `cargo build --release -p kline-oracle` in `clones/p3-s3a` (044808b8, `CARGO_TARGET_DIR=<p3-s3a>/target`) | 0 | Finished release 1m21s |
+| `python3 -m py_compile rehearsal/*.py`; `python3 -m unittest test_kit.py` | 0 | 13 tests OK |
+| `sh -n install.sh` | 0 | — |
+| recorder 2.7 min (`local-run/rec-v1`) → `summarize_rec.py` | 0 | 12 bulk (all 200, `resp_text`, 0 invariant violations), 144 rest_probe (all 200, three-form values identical 48/48), 3 proxy_stats |
+| `repull.py --local-format-test` on rec-v1 | 0 | 1 request (GAPUSDT absent 18:35Z): `startTime=G−2m`, `endTime=G+2m`, `limit=5`, rows at 18:33/18:34/18:36/18:37, no row at G |
+| `kp-evidence-compare` rec-v1 + repull-v1, `--allow-short-window` | 1 | **FAIL `gd_revised_total_nonzero: 12`**. The local state carried `revised_total=1` from injection 9 (offline reset preserves it, by design). Format: `bad_lines` 0, `missing_slots` 0, `dup_key_checked` 12 / unchecked 0, `replayed_bodies` 0, `gc_contract_or_invariant` 0, `gc_duplicate_json_key` 0, rest_probe errors 0/0/0, repull loaded with no problem; BLOCKED only `trading:no_coverage` (empty store) and `gb_undetermined: 6` (no canonical; the local repull is same-day, so not evidence) |
+| local test breaker re-provisioned like a fresh deployment (`{"last_conflict_ms":0,"revised_total":0}` with kp-1m stopped; local only), recorder 2 min again (`local-run/rec-v1b`) | 0 | 9 bulk, 108 rest_probe, 3 proxy_stats (last-minute stats now written), `revised_total` 0, trusted true |
+| `kp-evidence-compare` rec-v1b + repull-v1, `--allow-short-window` | 1 | **BLOCKED only for the canonical**: `canonical_undetermined: 160`, `trading:no_coverage=160 minutes/32 symbols`. Format errors **0**: `bad_lines` 0, `missing_slots` 0, `duplicate_slots` 0, `records_outside_range` 0, `bulk_errors` 0, `dup_key_checked` 9 / unchecked 0, `replayed_bodies` 0; G-a / G-c / G-d violations all 0; rest_probe errors 0; proxy_stats 3 parsed |
+| same, formal mode (no allow flags) | 1 | BLOCKED: the same canonical reason + `range spans 3 < 1440 minutes`. No `resp_text` reason (fix2-M3 satisfied) |
+
+Expected BLOCKED: the local canonical store is empty (`local-run/empty-store/swap_1m`, no
+Vision/sync for mock coins), so every covered minute is `no_coverage`, and G-b cannot be proven.
+A real PASS needs the formal sequence in RUNBOOK §5 on EPYC.
+
+### Open / not verified
+- `repull.py` against Binance: not run (no network). Locally it is exercised only through the
+  mock and `--local-format-test`; the day-ended rule was exercised by the normal run
+  (0 requests, nothing eligible on the same day).
+- `proxy_stats` units: blocked coin × 1 s sample per minute (gauge integration). If P3-S3a wants
+  event counts, kp-1m would need counters; that is a `crates/` change, out of scope.
+- The formal compare on real data (24 h, canonical synced after the Vision zips, repull
+  after the day) is the VPS/EPYC step in RUNBOOK §5.
+
+### Result
+**DONE.** The recording is schema v1; the local comparator self-test has 0 format errors, and its
+only BLOCKED reason is the expected empty canonical store. `repull.py` is added, and the RUNBOOK
+covers the formal O7 order, the cold-start exit and the night slot.

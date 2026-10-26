@@ -476,6 +476,14 @@ class Control(BaseHTTPRequestHandler):
                       "dropped": c["dropped"], "stalled": c["stall_until"] > L.now_ms()} for c in CONNS.values()]
             return self.send(200, {"now_ms": L.now_ms(), "rules": rules, "conns": conns,
                                    "last_seq": EVENTS[-1]["seq"] if EVENTS else 0, "kinds": INJECTIONS})
+        if u.path == "/stats":
+            # IP-wide X-MBX-USED-WEIGHT-1M seen on any relayed REST response in [from_ms, to_ms).
+            lo, hi = int(q.get("from_ms", 0)), int(q.get("to_ms", 1 << 62))
+            with LOCK:
+                ws = [int(e["weight_1m"]) for e in EVENTS if e["kind"] == "rest" and lo <= e["t_ms"] < hi
+                      and str(e.get("weight_1m") or "").isdigit()]
+            return self.send(200, {"from_ms": lo, "to_ms": hi, "responses_with_weight": len(ws),
+                                   "max_weight_1m": max(ws) if ws else None})
         if u.path == "/resolve":
             return self.send(200, {"symbols": resolve_symbols(q.get("spec", "top:5"))})
         self.send(404, {"error": "not found"})

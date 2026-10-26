@@ -10,6 +10,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import kp_lib as L  # noqa: E402
 import recorder_evidence as R  # noqa: E402
+import repull as RP  # noqa: E402
 
 FIXTURE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                        "crates", "kline-service", "tests", "fixtures", "kp_evidence_v1_example.json")
@@ -110,6 +111,32 @@ class Budget(unittest.TestCase):
         a = R.parse_args(["--hours", "1", "--out", "/x", "--ip-budget", "2400", "--other-weight", "600"])
         with self.assertRaises(AssertionError):
             R.check_budget(a, 4, 3)  # budget above the design ceiling
+
+
+class SchemaV1(unittest.TestCase):
+    """P3-S3a schema v1 (fix2 > fix1 > section 2) shapes produced by the kit."""
+
+    def test_bulk_record_has_exactly_one_body_field(self):
+        ok = R.bulk_record(60_000, 0.5, 3, ["A", "B"], 60_500, 0.1, 200, b'{"x":1}', None)
+        self.assertEqual(ok["resp_text"], '{"x":1}')
+        self.assertNotIn("error", ok)
+        self.assertNotIn("resp", ok)
+        self.assertEqual((ok["schema"], ok["kind"], ok["n_req"], ok["with_evidence"]), (1, "bulk", 2, True))
+        bad = R.bulk_record(60_000, 0.5, 3, ["A"], 60_500, 0.1, 503, b"busy", None)
+        self.assertTrue(bad["error"].startswith("HTTP 503"))
+        self.assertNotIn("resp_text", bad)
+        err = R.bulk_record(60_000, 0.5, 3, ["A"], None, None, None, b"", "timeout")
+        self.assertEqual(err["error"], "timeout")
+        with self.assertRaises(AssertionError):
+            R.bulk_record(60_000, 0.5, 3, [], 60_500, 0.1, 200, b"{}", None)
+
+    def test_repull_runs_and_maturity(self):
+        h = 3_600_000
+        mins = [h - 120_000, h - 60_000, h, h + 60_000, h + 300_000]
+        self.assertEqual(RP.runs(mins), [[h - 120_000, h - 60_000], [h, h + 60_000], [h + 300_000]])
+        self.assertEqual(len(RP.runs([i * 60_000 for i in range(50)])[0]), 35)
+        self.assertEqual(RP.day_end(5), 86_400_000)
+        self.assertEqual(RP.day_end(86_400_000), 2 * 86_400_000)
 
 
 class Config(unittest.TestCase):

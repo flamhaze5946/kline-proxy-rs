@@ -27,9 +27,18 @@ def lines(pattern):
 
 
 def main(d):
+    kinds = defaultdict(int)
+    for r in lines(os.path.join(d, "*.jsonl.gz")):
+        kinds[r.get("kind")] += 1
+    print("records by kind:", dict(kinds))
     per = defaultdict(lambda: {"n": 0, "status": defaultdict(int), "viol": 0, "acc": [], "lat": [],
                                "trusted": set(), "revised": set()})
     for r in lines(os.path.join(d, "*.jsonl.gz")):
+        if r.get("kind") != "bulk":
+            continue
+        if "resp_text" in r:
+            r["resp"] = json.loads(r["resp_text"])
+            r["invariant"] = L.window_violations(r["resp"], requested=r["req_symbols"], limit=r["limit"])
         p = per[r["delta"]]
         p["n"] += 1
         p["status"][str(r.get("http_status", r.get("error", "?")))[:40]] += 1
@@ -54,10 +63,13 @@ def main(d):
                   round(statistics.median(p["lat"]), 3) if p["lat"] else None, max(p["lat"]) if p["lat"] else None))
     forms = defaultdict(lambda: {"n": 0, "status": defaultdict(int), "w": 0, "mature": 0})
     values = defaultdict(dict)
-    for r in lines(os.path.join(d, "rest", "*.jsonl.gz")):
+    for r in lines(os.path.join(d, "*.jsonl.gz")):
+        if r.get("kind") != "rest_probe":
+            continue
+        r["resp"], r["weight_1m"], r["end_time"] = r.get("rows"), r.get("used_weight_1m"), r["params"].get("endTime", 0)
         f = forms[r["form"]]
         f["n"] += 1
-        f["status"][str(r.get("http_status", r.get("skipped") or r.get("error", "?")))] += 1
+        f["status"][str(r.get("http_status", r.get("error", "?")))[:40]] += 1
         if r.get("weight_1m"):
             f["w"] = max(f["w"], int(r["weight_1m"]))
         rows = r.get("resp") if isinstance(r.get("resp"), list) else []
@@ -67,11 +79,11 @@ def main(d):
             f["mature"] += 1
             values[(r["T"], r["delta"], r["symbol"])][r["form"]] = rows[opens.index(m)][1:]
     print("REST probe forms")
-    for name in ("em", "st", "cold"):
+    for name in ("end_m", "start_time", "cold_page"):
         f = forms[name]
         print("  %-4s n=%-3d status=%s max_weight_1m=%d M_mature=%d" % (name, f["n"], dict(f["status"]), f["w"], f["mature"]))
     full = [v for v in values.values() if len(v) == 3]
-    agree = sum(1 for v in full if v["em"] == v["st"] == v["cold"])
+    agree = sum(1 for v in full if v["end_m"] == v["start_time"] == v["cold_page"])
     print("  same-moment triples with M mature in all three forms: %d, values identical: %d" % (len(full), agree))
 
 

@@ -40,7 +40,7 @@ else
 fi
 cp "$HERE/kp-1m.json" "$STAGE/$RELEASE.json"
 cp "$HERE"/systemd/*.service "$STAGE/units/"
-for f in kp_lib.py passthrough.py recorder_evidence.py inject.py load_f16.py summarize_rec.py; do cp "$HERE/$f" "$STAGE/rehearsal/"; done
+for f in kp_lib.py passthrough.py recorder_evidence.py repull.py inject.py load_f16.py summarize_rec.py; do cp "$HERE/$f" "$STAGE/rehearsal/"; done
 printf '{"last_conflict_ms":0,"revised_total":0}' > "$STAGE/breaker.json"
 GIT=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)
 DIRTY=$(git -C "$ROOT" status --porcelain -- crates Cargo.toml Cargo.lock 2>/dev/null | wc -l | tr -d ' ')
