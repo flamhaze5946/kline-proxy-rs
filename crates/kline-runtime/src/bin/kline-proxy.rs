@@ -141,11 +141,12 @@ async fn serve(config: Arc<Config>, engine: Arc<Engine>, clock: Arc<SyncedClock>
             } else {
                 Market::Spot
             };
-            tasks.push(tokio::spawn(lifecycle::sync_clock(
+            tasks.push(tokio::spawn(lifecycle::sync_clock_with_evidence(
                 api.clone(),
                 clock,
                 clock_market,
                 stop_rx.clone(),
+                engine.evidence_enabled(),
             )));
         }
         tasks.push(tokio::spawn(lifecycle::reconcile(

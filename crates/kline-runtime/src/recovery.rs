@@ -69,6 +69,9 @@ impl Recovery {
         self.repair_tail(id, open, TailGoal::Fresh).await
     }
     async fn repair_tail(&self, id: usize, open: i64, goal: TailGoal) -> Result<usize> {
+        if self.engine.evidence_enabled() {
+            return self.repair_evidence(id, open).await;
+        }
         let slot = self.engine.catalog.slot(id);
         let mut changes = slot.subscribe_changes();
         let complete = || {
@@ -144,7 +147,7 @@ impl Recovery {
         }
         Ok(count)
     }
-    async fn boundary_guard(&self, cold: bool) {
+    pub(crate) async fn boundary_guard(&self, cold: bool) {
         if cold {
             return;
         }
@@ -177,6 +180,9 @@ impl Recovery {
         initialized: bool,
         priority: Priority,
     ) -> Result<usize> {
+        if self.engine.evidence_enabled() {
+            return self.sync_evidence(id, initialized).await;
+        }
         let slot = self.engine.catalog.slot(id);
         if !slot.is_trading() {
             return Ok(0);

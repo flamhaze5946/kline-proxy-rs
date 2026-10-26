@@ -7,6 +7,7 @@ use std::sync::{
 
 #[derive(Clone)]
 pub struct Settings {
+    pub evidence: Option<crate::evidence::EvidenceSettings>,
     pub number_type: kline_core::NumberType,
     pub closed_bar_latency_enabled: bool,
     pub final_wait_ms: u64,
@@ -37,6 +38,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            evidence: None,
             number_type: kline_core::NumberType::Double,
             closed_bar_latency_enabled: true,
             final_wait_ms: 8_000,
@@ -78,6 +80,7 @@ pub struct Metrics {
 pub struct Engine {
     pub catalog: Catalog,
     pub metrics: Metrics,
+    pub(crate) evidence: crate::evidence::EvidenceRuntime,
     pub diagnostics: crate::diagnostics::Diagnostics,
     pub(crate) clock: Arc<dyn Clock>,
     pub(crate) settings: Settings,
@@ -107,6 +110,9 @@ impl Engine {
         settings.http_concurrency_limit = settings.http_concurrency_limit.clamp(1, 65_536);
         settings.http_admission_queue = settings.http_admission_queue.min(1 << 20);
         settings.http_admission_wait_ms = settings.http_admission_wait_ms.min(30_000);
+        if settings.evidence.is_some() {
+            catalog.enable_evidence();
+        }
         let windows = crate::windows::Windows::new(catalog.slots().len());
         let connects = Arc::new(match &settings.connect_journal {
             Some(journal) => {
@@ -129,6 +135,7 @@ impl Engine {
             builds: crate::build_pool::BuildPool::new(settings.concurrent_builds),
             settings,
             metrics: Metrics::default(),
+            evidence: crate::evidence::EvidenceRuntime::default(),
             diagnostics: crate::diagnostics::Diagnostics::default(),
             connects,
             revision: [AtomicU64::new(0), AtomicU64::new(0)],
@@ -206,6 +213,12 @@ impl Engine {
         }))
     }
     pub fn commit(&self, id: usize, update: Update) -> Result<Commit, kline_core::InvalidBar> {
+        if self.evidence_enabled() {
+            return self.commit_evidence(
+                id,
+                kline_core::evidence::EvidenceUpdate::Observation(update),
+            );
+        }
         if update.bar.number_type != self.settings.number_type {
             return Err(kline_core::InvalidBar::Number);
         }
@@ -286,11 +299,140 @@ impl Engine {
         }
         Ok(result)
     }
+    pub fn commit_evidence(
+        &self,
+        id: usize,
+        input: kline_core::evidence::EvidenceUpdate,
+    ) -> Result<Commit, kline_core::InvalidBar> {
+        self.commit_evidence_in_generation(id, input, None)
+    }
+    /// Recovery binds every row publication to the same tracked lifetime, so an
+    /// old response cannot resurrect an identity removed during its HTTP await.
+    pub fn commit_evidence_in_generation(
+        &self,
+        id: usize,
+        input: kline_core::evidence::EvidenceUpdate,
+        tracking_generation: Option<u64>,
+    ) -> Result<Commit, kline_core::InvalidBar> {
+        use kline_core::evidence::EvidenceUpdate;
+        if input
+            .bar()
+            .is_some_and(|bar| bar.number_type != self.settings.number_type)
+        {
+            return Err(kline_core::InvalidBar::Number);
+        }
+        let slot = self.catalog.slot(id);
+        let result = {
+            let mut series = slot.state.write();
+            if !slot.is_tracked()
+                || tracking_generation
+                    .is_some_and(|generation| generation != slot.tracking_generation())
+            {
+                return Ok(Commit::default());
+            }
+            let previous = series.evidence_record(input.open_time());
+            let incoming = crate::evidence::incoming_record(&input);
+            let mut trimmed = false;
+            let mut filled = false;
+            if let EvidenceUpdate::Observation(update) = &input
+                && update.source == kline_core::Source::Stream
+                && let Some(previous) = series
+                    .latest_bar()
+                    .filter(|bar| update.bar.open_time > bar.close_time.saturating_add(1))
+                    .cloned()
+            {
+                update.bar.validate()?;
+                kline_core::evidence::decimal_fields(&update.bar)?;
+                let period = slot.interval.millis();
+                let missing = (update.bar.open_time - previous.open_time - 1) / period;
+                let first = missing
+                    .saturating_sub(series.capacity().saturating_sub(1) as i64)
+                    .max(0)
+                    + 1;
+                for step in first..=missing {
+                    let result = series.commit_evidence(
+                        EvidenceUpdate::Observation(Update {
+                            bar: previous
+                                .synthetic_after(previous.open_time + step * period, period),
+                            closed: false,
+                            source: kline_core::Source::Synthetic,
+                            event_time: None,
+                            sequence: 0,
+                        }),
+                        slot.is_trading(),
+                    )?;
+                    trimmed |= result.trimmed;
+                    filled |= result.evidence_changed;
+                }
+                if filled {
+                    slot.gap_generation.fetch_add(1, Ordering::Release);
+                    self.gap_epoch.fetch_add(1, Ordering::Release);
+                }
+            }
+            let mut result = series.commit_evidence(input, slot.is_trading())?;
+            result.trimmed |= trimmed;
+            result.evidence_changed |= filled || trimmed;
+            if series.covered_from().is_some() {
+                slot.populated.store(true, Ordering::Release);
+            }
+            // Conflict evaluation precedes replacement under this same series lock.
+            if result.evidence_conflict {
+                self.evidence.record(crate::evidence::EvidenceConflict {
+                    id,
+                    observed_ms: self.now_ms(),
+                    previous,
+                    incoming,
+                    trips_breaker: result.breaker_conflict,
+                });
+                self.metrics.final_revisions.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(id, symbol=%slot.symbol, trips_breaker=result.breaker_conflict, "evidence conclusion revised");
+            }
+            if result.evidence_changed {
+                slot.durable_generation.fetch_add(1, Ordering::Release);
+            }
+            if result.evidence_changed || result.stream_final_observed {
+                slot.window_generation.fetch_add(1, Ordering::Release);
+            }
+            result
+        };
+        if result.evidence_changed {
+            self.revision[slot.market as usize].fetch_add(1, Ordering::Release);
+        }
+        if result.evidence_changed || result.stream_final_observed {
+            slot.changed.send_modify(|n| *n = n.wrapping_add(1));
+            self.windows.invalidate(id);
+        }
+        Ok(result)
+    }
+
     pub fn refresh_catalog(
         &self,
         instruments: Vec<crate::Instrument>,
     ) -> Result<crate::catalog::CatalogChange, String> {
+        let _writer = self
+            .evidence_enabled()
+            .then(|| self.evidence.catalog_writer.lock());
+        let removed: Vec<_> = if self.evidence_enabled() {
+            let wanted: std::collections::HashSet<_> = instruments
+                .iter()
+                .map(|i| (i.market, i.interval, i.symbol.as_str()))
+                .collect();
+            self.catalog
+                .slots()
+                .iter()
+                .filter(|slot| {
+                    slot.is_tracked()
+                        && !wanted.contains(&(slot.market, slot.interval, slot.symbol.as_ref()))
+                })
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
         let change = self.catalog.sync(instruments)?;
+        for slot in removed {
+            slot.tracking_generation.fetch_add(1, Ordering::Release);
+        }
         if change.changed {
             self.windows.resize(self.catalog.slots().len());
             for id in 0..self.catalog.slots().len() {

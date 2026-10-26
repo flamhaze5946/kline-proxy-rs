@@ -28,7 +28,11 @@ pub struct Slot {
     pub symbol: Arc<str>,
     pub interval: Interval,
     trading: AtomicBool,
+    rest_gate: Arc<tokio::sync::Mutex<()>>,
+    last_rest_request_ms: AtomicI64,
+    not_trading_since: AtomicI64,
     tracked: AtomicBool,
+    pub(crate) tracking_generation: AtomicU64,
     pub last_stream_ms: AtomicI64,
     pub(crate) state: RwLock<Series>,
     pub(crate) changed: watch::Sender<u64>,
@@ -39,6 +43,31 @@ pub struct Slot {
     pub(crate) recheck_generation: AtomicU64,
 }
 impl Slot {
+    pub fn tracking_generation(&self) -> u64 {
+        self.tracking_generation.load(Ordering::Acquire)
+    }
+    /// Recovery holds this from limiter admission through evidence publication.
+    pub fn rest_gate(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.rest_gate.clone()
+    }
+    pub fn last_rest_request_ms(&self) -> i64 {
+        self.last_rest_request_ms.load(Ordering::Acquire)
+    }
+    pub fn mark_rest_request(&self, now: i64) {
+        self.last_rest_request_ms.store(now, Ordering::Release);
+    }
+    pub fn not_trading_since(&self) -> Option<i64> {
+        let n = self.not_trading_since.load(Ordering::Acquire);
+        (n >= 0).then_some(n)
+    }
+    pub fn set_not_trading_since(&self, since: Option<i64>) {
+        self.not_trading_since
+            .store(since.unwrap_or(-1), Ordering::Release);
+    }
+    pub fn evidence_record(&self, open: i64) -> kline_core::evidence::EvidenceRecord {
+        self.state.read().evidence_record(open)
+    }
+
     pub fn is_trading(&self) -> bool {
         self.trading.load(Ordering::Acquire)
     }
@@ -185,6 +214,7 @@ impl Deref for CatalogView {
     }
 }
 pub struct Catalog {
+    evidence_enabled: AtomicBool,
     view: ArcSwap<CatalogView>,
     writer: Mutex<()>,
 }
@@ -197,6 +227,7 @@ pub struct CatalogChange {
 impl Catalog {
     pub fn new(instruments: Vec<Instrument>) -> Result<Self, String> {
         let catalog = Self {
+            evidence_enabled: AtomicBool::new(false),
             view: ArcSwap::from_pointee(CatalogView {
                 slots: vec![],
                 symbols: HashMap::new(),
@@ -208,6 +239,13 @@ impl Catalog {
         };
         catalog.sync(instruments)?;
         Ok(catalog)
+    }
+    pub(crate) fn enable_evidence(&self) {
+        let _writer = self.writer.lock();
+        self.evidence_enabled.store(true, Ordering::Release);
+        for slot in self.view.load().iter() {
+            slot.state.write().enable_evidence();
+        }
     }
     pub fn sync(&self, mut instruments: Vec<Instrument>) -> Result<CatalogChange, String> {
         let _writer = self.writer.lock();
@@ -264,9 +302,19 @@ impl Catalog {
                     symbol: i.symbol.clone().into(),
                     interval: i.interval,
                     trading: AtomicBool::new(i.trading),
+                    rest_gate: Arc::new(tokio::sync::Mutex::new(())),
+                    last_rest_request_ms: AtomicI64::new(i64::MIN),
+                    not_trading_since: AtomicI64::new(-1),
                     tracked: AtomicBool::new(true),
+                    tracking_generation: AtomicU64::new(0),
                     last_stream_ms: AtomicI64::new(0),
-                    state: RwLock::new(Series::new(i.capacity)),
+                    state: RwLock::new({
+                        let mut series = Series::new(i.capacity);
+                        if self.evidence_enabled.load(Ordering::Acquire) {
+                            series.enable_evidence();
+                        }
+                        series
+                    }),
                     changed: watch::channel(0).0,
                     populated: AtomicBool::new(false),
                     durable_generation: AtomicU64::new(0),
