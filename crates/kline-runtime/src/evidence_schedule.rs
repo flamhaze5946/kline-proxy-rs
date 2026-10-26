@@ -225,6 +225,28 @@ impl TaskRecord {
     }
 }
 
+/// Persistent least-recently-attempted order within each earliest-minute bucket.
+#[derive(Default)]
+pub(crate) struct FallbackOrder {
+    sequence: u64,
+    attempts: Vec<u64>,
+}
+impl FallbackOrder {
+    pub fn rank(&self, id: usize) -> u64 {
+        self.attempts.get(id).copied().unwrap_or(0)
+    }
+    pub fn forget(&mut self, id: usize) {
+        if let Some(rank) = self.attempts.get_mut(id) {
+            *rank = 0;
+        }
+    }
+    pub fn consume(&mut self, id: usize) {
+        self.attempts.resize(self.attempts.len().max(id + 1), 0);
+        self.sequence += 1;
+        self.attempts[id] = self.sequence;
+    }
+}
+
 pub(crate) struct FallbackBudget {
     grants: VecDeque<i64>,
     limit: u32,
@@ -375,5 +397,39 @@ mod slow_completion_tests {
             r.fallback_due(105_000, 0, 0, 60_000),
             Some(FallbackDue::Target)
         );
+    }
+}
+
+#[cfg(test)]
+mod fix1_fairness_tests {
+    use super::*;
+    #[test]
+    fn all_750_equal_earliest_symbols_get_a_turn_despite_fast_low_id_failures() {
+        let mut order = FallbackOrder::default();
+        let mut budget = FallbackBudget::new(120);
+        let mut seen = BTreeSet::new();
+        let mut now = 0;
+        let mut last = vec![i64::MIN; 750];
+        while seen.len() < 750 && now < 8 * MINUTE {
+            if budget.available(now) {
+                let mut candidates: Vec<_> = (0..750)
+                    .filter(|&id| now.saturating_sub(last[id]) >= 5000)
+                    .collect();
+                candidates.sort_by_key(|&id| (0, order.rank(id), id));
+                let id = candidates[0];
+                budget.consume(now);
+                order.consume(id);
+                last[id] = now;
+                seen.insert(id);
+                // Every reply fails after 50ms. Retaining demand must not reset order.
+            }
+            now += 50;
+        }
+        assert_eq!(seen.len(), 750);
+        assert!(now < 8 * MINUTE);
+        // E remains the primary key even after a different bucket was rotated.
+        let mut candidates = [(10, 0), (9, 749)];
+        candidates.sort_by_key(|&(e, id)| (e, order.rank(id), id));
+        assert_eq!(candidates[0], (9, 749));
     }
 }

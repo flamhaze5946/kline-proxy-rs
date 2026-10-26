@@ -3,7 +3,7 @@ use crate::{recovery::Recovery, rest::Priority};
 use anyhow::Result;
 use kline_core::{
     Bar, Source, Update,
-    evidence::{EvidenceState, EvidenceUpdate, MINUTE_MS as MINUTE, decimal_fields, rest_verdict},
+    evidence::{EvidenceState, EvidenceUpdate, MINUTE_MS as MINUTE, rest_verdict, validate_bar},
 };
 use tokio::sync::OwnedMutexGuard;
 
@@ -84,6 +84,21 @@ impl Recovery {
             .map_or(boundary - MINUTE, |since| {
                 ((since - 1).div_euclid(MINUTE) * MINUTE).min(boundary - MINUTE)
             });
+        if slot.is_trading() {
+            // 97 closed target minutes, one left anchor and the forming successor.
+            // This is independent of which rows have already arrived over WS.
+            return EvidenceRequest {
+                kind: TaskKind::Routine,
+                range: VerdictRange {
+                    first: (boundary - 97 * MINUTE).max(0),
+                    last,
+                },
+                start: Some((boundary - 98 * MINUTE).max(0)),
+                end: now,
+                limit: 99,
+                priority: Priority::Background,
+            };
+        }
         let trusted = self.engine.ws_final_trusted();
         let first = slot.select_bars(|series| {
             let records = series.records();
@@ -113,6 +128,29 @@ impl Recovery {
             limit: ((end - start) / MINUTE + 1).clamp(1, 499) as usize,
             priority: Priority::Background,
         }
+    }
+    pub(crate) fn evidence_history_request(&self, id: usize, now: i64) -> Option<EvidenceRequest> {
+        let slot = self.engine.catalog.slot(id);
+        let last = now.div_euclid(MINUTE) * MINUTE - 98 * MINUTE;
+        let first = slot.select_bars(|series| {
+            series.covered_from().and_then(|first| {
+                (first <= last)
+                    .then(|| {
+                        series.earliest_needs_verdict(first, last, self.engine.ws_final_trusted())
+                    })
+                    .flatten()
+            })
+        })?;
+        let start = first.saturating_sub(MINUTE).max(0);
+        let end = now.min(start.saturating_add(499 * MINUTE - 1));
+        Some(EvidenceRequest {
+            kind: TaskKind::History,
+            range: VerdictRange { first, last },
+            start: Some(start),
+            end,
+            limit: ((end - start) / MINUTE + 1).clamp(1, 499) as usize,
+            priority: Priority::Background,
+        })
     }
     /// The caller acquires the per-slot gate before this enters the limiter.
     /// The owned guard remains live through decoding, adjudication and commit.
@@ -159,9 +197,22 @@ impl Recovery {
         );
         // Validate the whole response before publishing any of it, including the
         // decimal lexemes that legacy string mode deliberately leaves opaque.
-        for bar in &bars {
-            bar.validate()?;
-            decimal_fields(bar)?;
+        anyhow::ensure!(bars.len() <= request.limit, "REST page exceeds limit");
+        for (i, bar) in bars.iter().enumerate() {
+            validate_bar(bar)?;
+            anyhow::ensure!(
+                bar.number_type == self.engine.number_type(),
+                "REST number type mismatch"
+            );
+            anyhow::ensure!(
+                bar.open_time <= request.end
+                    && request.start.is_none_or(|start| bar.open_time >= start),
+                "REST row outside request"
+            );
+            anyhow::ensure!(
+                i == 0 || bars[i - 1].open_time < bar.open_time,
+                "REST rows not strictly increasing"
+            );
         }
         let count = bars.len();
         let slot = self.engine.catalog.slot(id);
@@ -274,5 +325,81 @@ impl Recovery {
         let latest = slot.interval.boundary(now) - MINUTE;
         self.execute_evidence(id, EvidenceRequest::fallback(open, latest, now), gate)
             .await
+    }
+}
+
+#[cfg(test)]
+mod fix1_history_tests {
+    use super::*;
+    use kline_core::{Interval, Market, NumberType};
+    use kline_service::{Catalog, Clock, Engine, Instrument, Settings, evidence::EvidenceSettings};
+    use std::{num::NonZeroUsize, sync::Arc};
+    struct FixedClock(i64);
+    impl Clock for FixedClock {
+        fn now_ms(&self) -> i64 {
+            self.0
+        }
+    }
+    #[test]
+    fn older_pending_is_a_separate_history_plan_without_widening_routine() {
+        let boundary = 6_000_000_000;
+        let e = Engine::new(
+            Catalog::new(vec![Instrument {
+                market: Market::Future,
+                interval: Interval::parse("1m").unwrap(),
+                symbol: "BTCUSDT".into(),
+                trading: true,
+                continuous: Some(("BTCUSDT".into(), "PERPETUAL".into())),
+                capacity: NonZeroUsize::new(241).unwrap(),
+            }])
+            .unwrap(),
+            Arc::new(FixedClock(boundary + 1500)),
+            Settings {
+                number_type: NumberType::String,
+                evidence: Some(EvidenceSettings::default()),
+                ..Settings::default()
+            },
+        );
+        for open in (boundary - 240 * MINUTE..=boundary).step_by(MINUTE as usize) {
+            let mut bar = Bar {
+                open_time: open,
+                close_time: open + MINUTE - 1,
+                ..Bar::default()
+            };
+            bar.set_numbers(NumberType::String, ["1"; 8]).unwrap();
+            let input = if open == boundary - 200 * MINUTE {
+                EvidenceUpdate::Observation(Update {
+                    bar,
+                    closed: false,
+                    source: Source::Rest,
+                    event_time: None,
+                    sequence: 0,
+                })
+            } else {
+                EvidenceUpdate::Rest(bar)
+            };
+            e.commit_evidence(0, input).unwrap();
+        }
+        let r = Recovery {
+            engine: e,
+            api: crate::rest::RestApi::new_with_type(
+                "http://127.0.0.1:1",
+                "http://127.0.0.1:1",
+                6000,
+                NumberType::String,
+            )
+            .unwrap(),
+            config: crate::config::RestConfig::default(),
+        };
+        let routine = r.evidence_sync_request(0, true, boundary + 1500);
+        assert_eq!(routine.limit, 99);
+        assert_eq!(routine.start, Some(boundary - 98 * MINUTE));
+        let history = r.evidence_history_request(0, boundary + 1500).unwrap();
+        assert_eq!(history.kind, TaskKind::History);
+        assert_eq!(history.range.first, boundary - 200 * MINUTE);
+        assert_eq!(history.range.last, boundary - 98 * MINUTE);
+        assert_eq!(history.start, Some(boundary - 201 * MINUTE));
+        assert_eq!(history.end, boundary + 1500);
+        assert_eq!(history.limit, 202);
     }
 }

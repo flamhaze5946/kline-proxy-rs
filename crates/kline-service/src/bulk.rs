@@ -208,58 +208,27 @@ impl Engine {
         let mut attempts = 0;
         while attempts < 4 {
             let now = not_before.map_or_else(|| self.bulk_now_ms(), |b| self.bulk_now_ms().max(b));
-            let symbols: Arc<[String]> = if with_evidence {
-                let mut symbols = if query.symbols.is_empty() {
-                    self.catalog
-                        .instruments()
-                        .into_iter()
-                        .filter(|i| i.market == query.market && i.interval == interval)
-                        .map(|i| i.symbol)
-                        .collect::<Vec<_>>()
-                } else {
-                    query
-                        .symbols
-                        .iter()
-                        .map(|s| crate::http_compat::java_trim(s).to_owned())
-                        .filter(|s| !s.is_empty())
-                        .collect()
-                };
-                symbols.sort();
-                symbols.dedup();
-                symbols.into()
+            let (key, symbols) = if with_evidence {
+                self.evidence_key(&query, interval, now)
             } else {
-                Arc::from([])
-            };
-            if with_evidence
-                && symbols
-                    .len()
-                    .saturating_mul(query.limit.unwrap_or(5).clamp(1, 100) as usize)
-                    > 75000
-            {
-                return Err(ServiceError::Evidence);
-            }
-            let key = Key {
-                market: query.market,
-                interval,
-                limit: query.limit.unwrap_or(5).clamp(1, 100) as usize,
-                closed_only: query.closed_only,
-                ids: if with_evidence {
-                    symbols
-                        .iter()
-                        .filter_map(|s| self.catalog.find(query.market, interval, s))
-                        .filter(|&id| self.catalog.slot(id).is_tracked())
-                        .collect::<Vec<_>>()
-                        .into()
-                } else {
-                    self.catalog
-                        .normalize(query.market, interval, &query.symbols)
-                },
-                boundary: interval.boundary(now),
-                revision: if query.closed_only {
-                    self.catalog.generation()
-                } else {
-                    self.revision(query.market)
-                },
+                (
+                    Key {
+                        market: query.market,
+                        interval,
+                        limit: query.limit.unwrap_or(5).clamp(1, 100) as usize,
+                        closed_only: query.closed_only,
+                        ids: self
+                            .catalog
+                            .normalize(query.market, interval, &query.symbols),
+                        boundary: interval.boundary(now),
+                        revision: if query.closed_only {
+                            self.catalog.generation()
+                        } else {
+                            self.revision(query.market)
+                        },
+                    },
+                    Arc::from([]),
+                )
             };
             if query.closed_only {
                 // The selected boundary only moves forward: a retry or a wait for a slot after
@@ -323,7 +292,7 @@ impl Engine {
                 Lookup::Flight(registration) => {
                     let candidate = registration.payload.clone();
                     let final_deadline = registration.final_deadline;
-                    registration
+                    let result = registration
                         .cell
                         .get_or_try_init(|| async {
                             let waiting = std::time::Instant::now();
@@ -371,8 +340,17 @@ impl Engine {
                             }
                             Ok::<_, ServiceError>(reply)
                         })
-                        .await?
-                        .clone()
+                        .await;
+                    match result {
+                        Ok(reply) => reply.clone(),
+                        Err(error)
+                            if with_evidence && crate::evidence_bulk::is_stale_evidence(&error) =>
+                        {
+                            attempts += 1;
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
             };
             attempts += 1;

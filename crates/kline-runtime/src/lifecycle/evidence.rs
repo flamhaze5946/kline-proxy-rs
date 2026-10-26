@@ -2,7 +2,7 @@
 use super::*;
 use crate::{
     evidence_recovery::{EvidenceRequest, TaskKind},
-    evidence_schedule::{FallbackBudget, TaskRecord},
+    evidence_schedule::{FallbackBudget, FallbackOrder, TaskRecord},
 };
 use kline_core::evidence::MINUTE_MS as MINUTE;
 
@@ -24,6 +24,7 @@ pub(super) async fn reconcile(
         crate::evidence_schedule::Attempt,
         anyhow::Result<usize>,
     )> = JoinSet::new();
+    let mut order = FallbackOrder::default();
     let mut fallback_running = 0;
     let mut sync_running = 0;
     let settings = engine.settings().evidence.as_ref().unwrap();
@@ -95,6 +96,7 @@ pub(super) async fn reconcile(
         for (id, slot) in slots.iter().enumerate() {
             if !slot.is_tracked() {
                 records[id] = None;
+                order.forget(id);
                 continue;
             }
             tracked += 1;
@@ -102,6 +104,7 @@ pub(super) async fn reconcile(
                 .as_ref()
                 .is_none_or(|record| record.tracking_generation != slot.tracking_generation())
             {
+                order.forget(id);
                 let mut record = TaskRecord::new(now);
                 record.tracking_generation = slot.tracking_generation();
                 records[id] = Some(record);
@@ -157,13 +160,19 @@ pub(super) async fn reconcile(
                 }
             }
             if !record.running
-                && let Some(kind) = record.sync_due(now, slot.is_trading())
+                && let Some(kind) = record.sync_due(now, slot.is_trading()).or_else(|| {
+                    (slot.is_trading()
+                        && record.initialized
+                        && now >= record.history.due
+                        && recovery.evidence_history_request(id, now).is_some())
+                    .then_some(TaskKind::History)
+                })
                 && (kind == TaskKind::Startup || !recovery.evidence_guarded(now))
             {
                 sync.push((kind, id));
             }
         }
-        fallback.sort_by_key(|&(earliest, id, _)| (earliest, id));
+        fallback.sort_by_key(|&(earliest, id, _)| (earliest, order.rank(id), id));
         let queued = fallback.len();
         let sync_queued = sync.len();
         let mut concurrency_blocked = 0;
@@ -194,6 +203,7 @@ pub(super) async fn reconcile(
                     slots[id].gap_generation(),
                 );
                 budget.consume(now);
+                order.consume(id);
                 fallback_running += 1;
                 let r = recovery.clone();
                 tasks.spawn(
@@ -214,7 +224,14 @@ pub(super) async fn reconcile(
                 let Ok(gate) = slots[id].rest_gate().try_lock_owned() else {
                     continue;
                 };
-                let request = recovery.evidence_sync_request(id, kind != TaskKind::Startup, now);
+                let request = if kind == TaskKind::History && slots[id].is_trading() {
+                    let Some(request) = recovery.evidence_history_request(id, now) else {
+                        continue;
+                    };
+                    request
+                } else {
+                    recovery.evidence_sync_request(id, kind != TaskKind::Startup, now)
+                };
                 let attempt = record.begin(
                     kind,
                     request.range,

@@ -1,9 +1,7 @@
-use crate::evidence::{
-    EvidenceRecord, EvidenceState, EvidenceUpdate, decimal_equal, decimal_fields,
-};
+use crate::evidence::{EvidenceRecord, EvidenceState, EvidenceUpdate, decimal_equal, validate_bar};
 use crate::{Bar, Interval, InvalidBar};
 use chrono::{Months, TimeZone, Utc};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::NonZeroUsize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +70,9 @@ pub struct Series {
     capacity: usize,
     evidence_enabled: bool,
     absent: BTreeSet<i64>,
+    evidence_changes: BTreeMap<i64, u64>,
+    evidence_revision: u64,
+    evidence_epoch: u64,
     // Process-local evidence of x=true; REST/restore finality cannot authorize extrapolation.
     latest_stream_final_open: Option<i64>,
 }
@@ -84,10 +85,17 @@ impl Series {
             capacity: capacity.get(),
             evidence_enabled: false,
             absent: BTreeSet::new(),
+            evidence_changes: BTreeMap::new(),
+            evidence_revision: 0,
+            evidence_epoch: 0,
             latest_stream_final_open: None,
         }
     }
     pub fn resize(&mut self, capacity: NonZeroUsize) {
+        if self.evidence_enabled {
+            self.evidence_revision += 1;
+            self.evidence_epoch = self.evidence_revision;
+        }
         self.capacity = capacity.get();
         while self.entries.len() > self.capacity {
             self.entries.pop_front();
@@ -99,6 +107,11 @@ impl Series {
         self.entries = VecDeque::new();
         self.latest_stream_final_open = None;
         self.absent.clear();
+        self.evidence_changes.clear();
+        if self.evidence_enabled {
+            self.evidence_revision += 1;
+            self.evidence_epoch = self.evidence_revision;
+        }
     }
     fn locate(&self, time: i64) -> Result<usize, usize> {
         if let Some(last) = self.entries.back() {
@@ -474,7 +487,42 @@ impl Series {
         self.absent = self.absent.split_off(&first);
         before != self.entries.len() + self.absent.len()
     }
+    /// A fixed-window token excludes ordinary updates outside that window.
+    pub fn evidence_window_stamp(&self, first: i64, last: i64) -> (Option<i64>, u64, u64) {
+        (
+            self.covered_from(),
+            self.evidence_epoch,
+            self.evidence_changes
+                .range(first..=last)
+                .map(|(_, v)| *v)
+                .max()
+                .unwrap_or(0),
+        )
+    }
     pub fn commit_evidence(
+        &mut self,
+        input: EvidenceUpdate,
+        trading: bool,
+    ) -> Result<Commit, InvalidBar> {
+        let open = input.open_time();
+        let result = self.commit_evidence_inner(input, trading)?;
+        if result.evidence_changed {
+            self.evidence_revision += 1;
+            self.evidence_changes.insert(open, self.evidence_revision);
+            let latest = self
+                .entries
+                .back()
+                .map(|e| e.bar.open_time)
+                .into_iter()
+                .chain(self.absent.last().copied())
+                .max()
+                .unwrap_or(open);
+            let floor = latest.saturating_sub((self.capacity.saturating_sub(1) as i64) * 60_000);
+            self.evidence_changes = self.evidence_changes.split_off(&floor);
+        }
+        Ok(result)
+    }
+    fn commit_evidence_inner(
         &mut self,
         input: EvidenceUpdate,
         trading: bool,
@@ -485,8 +533,7 @@ impl Series {
             return Err(InvalidBar::Time);
         }
         if let Some(bar) = input.bar() {
-            bar.validate()?;
-            decimal_fields(bar)?;
+            validate_bar(bar)?;
         }
         let latest = self
             .entries
@@ -548,6 +595,7 @@ impl Series {
                 if let Ok(i) = self.locate(open) {
                     let e = &mut self.entries[i];
                     e.evidence = Pending;
+                    result.evidence_changed |= e.synthetic != previous.synthetic;
                     if result.updated {
                         e.ws_equal = false;
                     }

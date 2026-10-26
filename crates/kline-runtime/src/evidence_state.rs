@@ -1,7 +1,9 @@
 //! Evidence-only state files and the process-lifetime advisory lock.
 use crate::config::Config;
 use anyhow::{Context, Result};
-use kline_service::{Engine, Instrument, evidence::BreakerState, evidence_bulk::RetainedRecord};
+use kline_service::{
+    Clock, Engine, Instrument, evidence::BreakerState, evidence_bulk::RetainedRecord,
+};
 use parking_lot::Mutex;
 use std::{
     collections::BTreeMap,
@@ -52,7 +54,8 @@ impl StateDirectory {
         let breaker = match read_breaker(&root.join("breaker.json")) {
             Ok(state) => state,
             Err(error) => {
-                tracing::warn!(%error,"breaker missing/unreadable; revised_total=0, WS final trust disabled");
+                let preserved = preserve_unreadable(&root.join("breaker.json"), engine.now_ms())?;
+                tracing::warn!(%error, ?preserved,"breaker missing/unreadable; revised_total=0, WS final trust disabled");
                 BreakerState {
                     last_conflict_ms: engine.now_ms(),
                     revised_total: 0,
@@ -156,6 +159,22 @@ fn read_breaker(path: &Path) -> Result<BreakerState> {
     anyhow::ensure!(state.last_conflict_ms >= 0, "invalid breaker timestamp");
     Ok(state)
 }
+fn preserve_unreadable(path: &Path, now: i64) -> Result<Option<PathBuf>> {
+    match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).context("cannot preserve unreadable breaker"),
+        Ok(_) => {}
+    }
+    let mut timestamp = now;
+    loop {
+        let preserved = path.with_file_name(format!("breaker.json.unreadable.{timestamp}"));
+        if !preserved.try_exists()? {
+            fs::rename(path, &preserved).context("cannot preserve unreadable breaker")?;
+            return Ok(Some(preserved));
+        }
+        timestamp += 1;
+    }
+}
 pub fn reset_breaker(config: &Config) -> Result<BreakerState> {
     anyhow::ensure!(
         config.evidence.is_some(),
@@ -170,6 +189,13 @@ pub fn reset_breaker(config: &Config) -> Result<BreakerState> {
     let mut state = match read_breaker(&root.join("breaker.json")) {
         Ok(state) => state,
         Err(error) => {
+            let now = kline_service::SystemClock {
+                offset_ms: config.clock_offset_ms,
+            }
+            .now_ms();
+            if let Some(path) = preserve_unreadable(&root.join("breaker.json"), now)? {
+                eprintln!("preserved unreadable breaker: {}", path.display());
+            }
             eprintln!("old revised_total unreadable; using 0: {error}");
             BreakerState::default()
         }

@@ -62,6 +62,16 @@ impl EvidenceUpdate {
     }
 }
 
+/// The complete row check shared by REST preflight, WS preflight and commit.
+pub fn validate_bar(bar: &Bar) -> Result<(), InvalidBar> {
+    if bar.open_time < 0 || bar.open_time % MINUTE_MS != 0 {
+        return Err(InvalidBar::Time);
+    }
+    bar.validate()?;
+    decimal_fields(bar)?;
+    Ok(())
+}
+
 /// Branch A: one mature REST response is a verdict. Branch B would change only
 /// this decision boundary, rather than adding a runtime policy switch.
 pub fn mature_rest_is_verdict(_response: &[Bar], _open: i64, _end_time: i64) -> bool {

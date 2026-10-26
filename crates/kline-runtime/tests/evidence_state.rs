@@ -517,3 +517,93 @@ async fn shutdown_during_a_flush_writes_conflicts_newer_than_that_flush_snapshot
     assert_eq!(stored, e.breaker_state());
     StateDirectory::lock(t.path()).unwrap();
 }
+
+#[test]
+fn fix1_unreadable_breaker_is_preserved_before_load_flush_and_reset() {
+    let t = tempfile::tempdir().unwrap();
+    let c = config(t.path());
+    let original = b"{broken breaker with forensic bytes";
+    std::fs::write(t.path().join("breaker.json"), original).unwrap();
+    let e = engine(&c);
+    let state = StateDirectory::load(&c, &e).unwrap();
+    assert!(!e.ws_final_trusted());
+    let preserved = t.path().join(format!("breaker.json.unreadable.{NOW}"));
+    assert_eq!(std::fs::read(&preserved).unwrap(), original);
+    assert!(!t.path().join("breaker.json").exists());
+    state.flush(&c, &e).unwrap();
+    assert_eq!(std::fs::read(&preserved).unwrap(), original);
+    drop(state);
+    // A second load in the same millisecond must not overwrite the first copy.
+    std::fs::write(t.path().join("breaker.json"), b"second bad breaker").unwrap();
+    drop(StateDirectory::load(&c, &engine(&c)).unwrap());
+    assert_eq!(
+        std::fs::read(
+            t.path()
+                .join(format!("breaker.json.unreadable.{}", NOW + 1))
+        )
+        .unwrap(),
+        b"second bad breaker"
+    );
+    let config_path = t.path().join("config.json");
+    let raw = serde_json::json!({"listen":"127.0.0.1:0","number_type":"string","history_capacity":241,
+        "evidence":{"ws_trust_window_ms":60000},"bulk_admission_wait_ms":100,"http_admission_wait_ms":100,"bulk_pre_boundary_wait_ms":0,
+        "subscriptions":[{"market":"future","interval":"1m","continuous":true,"history_capacity":241}],
+        "rest":{"latest_repair_workers":2},"persistence":{"directory":t.path(),"boundary_guard_before_ms":2000,"boundary_guard_after_ms":15000}});
+    std::fs::write(&config_path, raw.to_string()).unwrap();
+    std::fs::write(t.path().join("breaker.json"), b"reset forensic bytes").unwrap();
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_kline-proxy"))
+        .args(["--reset-breaker", config_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    let path = stderr
+        .lines()
+        .find_map(|s| s.strip_prefix("preserved unreadable breaker: "))
+        .unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), b"reset forensic bytes");
+    assert_eq!(
+        evidence_state::reset_breaker(&c).unwrap(),
+        BreakerState::default()
+    );
+}
+
+#[test]
+fn fix1_expired_ineligible_return_cleans_old_snapshot_and_keeps_retry_basis_on_error() {
+    for qualified in [false, true] {
+        let t = tempfile::tempdir().unwrap();
+        let c = config(t.path());
+        let e = engine(&c);
+        merge(&c, &e, &exchange("TRADING", "BTCUSDT", "PERPETUAL"), NOW);
+        let path = Store::new(t.path(), 1).unwrap().path(&e.catalog.slot(0));
+        merge(&c, &e, &json!({"symbols":[]}), NOW + 1000);
+        let restarted = config(t.path());
+        let fresh = engine(&restarted);
+        let _state = StateDirectory::load(&restarted, &fresh).unwrap();
+        let metadata = exchange(
+            "TRADING",
+            if qualified { "BTCUSDT" } else { "OTHER" },
+            "PERPETUAL",
+        );
+        if qualified {
+            std::fs::write(&path, b"must survive qualified relisting").unwrap();
+        } else {
+            std::fs::create_dir(&path).unwrap();
+            let records = evidence_state::retained_records(&restarted);
+            assert!(evidence_directory::merge(&restarted, &metadata, NOW + 61000).is_err());
+            assert_eq!(evidence_state::retained_records(&restarted), records);
+            std::fs::remove_dir(&path).unwrap();
+            std::fs::write(&path, b"orphan snapshot").unwrap();
+        }
+        merge(&restarted, &fresh, &metadata, NOW + 61000);
+        assert!(evidence_state::retained_records(&restarted).is_empty());
+        assert_eq!(path.exists(), qualified);
+        assert_eq!(
+            fresh
+                .catalog
+                .find(Market::Future, Interval::parse("1m").unwrap(), "BTCUSDT")
+                .is_some(),
+            qualified
+        );
+    }
+}

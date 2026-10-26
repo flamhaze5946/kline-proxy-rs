@@ -75,21 +75,8 @@ pub fn merge(config: &Config, exchange: &Value, now: i64) -> Result<Vec<Instrume
                 });
         }
     }
-    let mut expired = Vec::new();
     for (symbol, record) in &records {
         if record.expires_ms <= now {
-            // Qualified TRADING was already handled above; never clean it here.
-            if !instruments.contains_key(symbol) {
-                if let Some(p) = &config.persistence {
-                    crate::storage::remove_snapshot_identity(
-                        &p.directory,
-                        Market::Future,
-                        Interval::parse("1m").unwrap(),
-                        symbol,
-                    )?;
-                }
-                expired.push(symbol.clone());
-            }
             continue;
         }
         let capacity =
@@ -103,9 +90,22 @@ pub fn merge(config: &Config, exchange: &Value, now: i64) -> Result<Vec<Instrume
             capacity,
         });
     }
-    for symbol in expired {
-        records.remove(&symbol);
+    // Revocations above must not erase the retry basis for an expired orphan.
+    // Cleanup is based on old records and the fully merged directory.
+    for (symbol, record) in old.iter().chain(records.iter()) {
+        if record.expires_ms <= now
+            && !instruments.contains_key(symbol)
+            && let Some(p) = &config.persistence
+        {
+            crate::storage::remove_snapshot_identity(
+                &p.directory,
+                Market::Future,
+                Interval::parse("1m").unwrap(),
+                symbol,
+            )?;
+        }
     }
+    records.retain(|_, record| record.expires_ms > now);
     if old != records {
         runtime.generation = runtime.generation.wrapping_add(1);
     }

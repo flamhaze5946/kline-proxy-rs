@@ -230,3 +230,82 @@ fn matching_late_ws_keeps_the_legacy_provisional_tail_available() {
     assert!(slot.lifecycle_status(NOW + 30_000, 15_000, NOW - M).3);
     assert_eq!(durable, slot.durable_generation());
 }
+
+#[tokio::test]
+async fn fix1_invalid_ws_with_existing_history_cannot_fill_or_trim_or_invalidate() {
+    let (e, clock) = engine();
+    clock.0.store(NOW + 10000, Ordering::Relaxed);
+    e.commit_evidence(0, ws("1")).unwrap();
+    let query = || kline_service::BulkQuery {
+        market: Market::Future,
+        interval: "1m".into(),
+        limit: Some(1),
+        closed_only: true,
+        symbols: vec!["BTCUSDT".into()],
+    };
+    let reply = e.bulk_with_evidence(query()).await.unwrap();
+    let slot = e.catalog.slot(0);
+    let before = (
+        format!("{:?}", slot.records()),
+        slot.durable_generation(),
+        slot.window_generation(),
+        slot.gap_generation(),
+        slot.tracking_generation(),
+        e.gap_epoch(),
+        e.breaker_snapshot(),
+        e.cache_sizes(),
+    );
+    let mut bad = bar("2");
+    bad.open_time = NOW + 300 * M + 1;
+    bad.close_time = bad.open_time + M - 1;
+    assert!(
+        e.commit(
+            0,
+            Update {
+                bar: bad,
+                closed: true,
+                source: Source::Stream,
+                event_time: Some(NOW + 1),
+                sequence: 2
+            }
+        )
+        .is_err()
+    );
+    assert_eq!(
+        (
+            format!("{:?}", slot.records()),
+            slot.durable_generation(),
+            slot.window_generation(),
+            slot.gap_generation(),
+            slot.tracking_generation(),
+            e.gap_epoch(),
+            e.breaker_snapshot(),
+            e.cache_sizes()
+        ),
+        before
+    );
+    let off_grid = NOW + 300 * M + 1;
+    let frame = serde_json::json!({"e":"continuous_kline","E":NOW+1,"ps":"BTCUSDT","ct":"PERPETUAL",
+        "k":{"t":off_grid,"T":off_grid+M-1,"i":"1m","o":"2","h":"2","l":"2","c":"2","v":"2","q":"2","n":1,"V":"2","Q":"2","x":true}});
+    assert!(
+        e.ingest(Market::Future, &serde_json::to_vec(&frame).unwrap())
+            .is_err()
+    );
+    assert_eq!(
+        (
+            format!("{:?}", slot.records()),
+            slot.durable_generation(),
+            slot.window_generation(),
+            slot.gap_generation(),
+            slot.tracking_generation(),
+            e.gap_epoch(),
+            e.breaker_snapshot(),
+            e.cache_sizes()
+        ),
+        before
+    );
+    assert!(Arc::ptr_eq(
+        &reply,
+        &e.bulk_with_evidence(query()).await.unwrap()
+    ));
+}

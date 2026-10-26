@@ -328,6 +328,11 @@ impl Engine {
         {
             return Err(kline_core::InvalidBar::Number);
         }
+        if let Some(bar) = input.bar() {
+            kline_core::evidence::validate_bar(bar)?;
+        } else if input.open_time() < 0 || input.open_time() % 60_000 != 0 {
+            return Err(kline_core::InvalidBar::Time);
+        }
         let slot = self.catalog.slot(id);
         let result = {
             let mut series = slot.state.write();

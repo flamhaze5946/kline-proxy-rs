@@ -646,3 +646,221 @@ async fn absent_latest_releases_evidence_wait_but_a_missing_latest_does_not() {
     assert_eq!(late["ws_final_trusted"], false);
     assert_eq!(late["revised_total"], 1);
 }
+
+#[tokio::test]
+async fn fix1_wire_classification_has_an_independent_literal_state_trust_table() {
+    // No needs_verdict or server classification helper is used by this oracle.
+    for (state, trusted, expected, gaps, synthetic) in [
+        ("empty", true, None, "missing", false),
+        ("empty", false, None, "missing", false),
+        ("P", true, Some("pending"), "", false),
+        ("P", false, Some("pending"), "", false),
+        ("W", true, Some("final"), "", false),
+        ("W", false, Some("pending"), "", false),
+        ("R", true, Some("final"), "", false),
+        ("R", false, Some("final"), "", false),
+        ("A", true, None, "absent", false),
+        ("A", false, None, "absent", false),
+        ("synthetic", true, Some("pending"), "", true),
+        ("synthetic", false, Some("pending"), "", true),
+    ] {
+        let (source, clock) = fixture();
+        let id = source
+            .catalog
+            .find(Market::Future, Interval::parse("1m").unwrap(), "BTCUSDT")
+            .unwrap();
+        let definition = source
+            .catalog
+            .instruments()
+            .into_iter()
+            .find(|i| i.symbol == "BTCUSDT")
+            .unwrap();
+        let e = Engine::new(
+            Catalog::new(vec![definition]).unwrap(),
+            clock,
+            source.settings().clone(),
+        );
+        e.commit_evidence(
+            0,
+            EvidenceUpdate::Rest(source.catalog.slot(id).get(180000).unwrap().0),
+        )
+        .unwrap();
+        let bar = source.catalog.slot(id).get(240000).unwrap().0;
+        match state {
+            "R" => {
+                e.commit_evidence(0, EvidenceUpdate::Rest(bar)).unwrap();
+            }
+            "A" => {
+                e.commit_evidence(0, EvidenceUpdate::Absent(240000))
+                    .unwrap();
+            }
+            "empty" => {}
+            _ => {
+                e.commit(
+                    0,
+                    Update {
+                        bar,
+                        closed: state == "W",
+                        source: match state {
+                            "W" => Source::Stream,
+                            "synthetic" => Source::Synthetic,
+                            _ => Source::Rest,
+                        },
+                        event_time: None,
+                        sequence: 0,
+                    },
+                )
+                .unwrap();
+            }
+        }
+        if !trusted {
+            e.restore_breaker(kline_service::evidence::BreakerState {
+                last_conflict_ms: 300500,
+                revised_total: 0,
+            });
+        }
+        let (status, packet) = get(
+            e,
+            "/fapi/v1/klines/bulk?interval=1m&limit=1&symbols=BTCUSDT&with_evidence=true",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(packet["ws_final_trusted"], trusted);
+        assert_eq!(
+            packet["evidence"]["BTCUSDT"],
+            expected.map_or_else(|| json!([]), |s| json!([s])),
+            "{state}/{trusted}"
+        );
+        assert_eq!(
+            packet["klines"]["BTCUSDT"].as_array().unwrap().len(),
+            usize::from(expected.is_some())
+        );
+        assert_eq!(
+            packet["missing"]["BTCUSDT"],
+            if gaps == "missing" {
+                json!([240000])
+            } else {
+                json!([])
+            }
+        );
+        assert_eq!(
+            packet["absent"]["BTCUSDT"],
+            if gaps == "absent" {
+                json!([240000])
+            } else {
+                json!([])
+            }
+        );
+        assert_eq!(
+            packet["synthetic"]["BTCUSDT"],
+            if synthetic {
+                json!([240000])
+            } else {
+                json!([])
+            }
+        );
+    }
+}
+
+#[tokio::test]
+async fn fix1_five_negative_packets_fail_a_literal_per_minute_oracle() {
+    fn literal_matches(packet: &Value) -> bool {
+        let expected_symbols = ["BNBUSDT", "BTCUSDT", "ETHUSDT", "OLDUSDT", "UNKNOWNUSDT"];
+        if !packet["status"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .eq(expected_symbols)
+        {
+            return false;
+        }
+        // Window is [60000,300000]; each column is an exact minute, not a row count.
+        for (symbol, expected) in [
+            ("BTCUSDT", ["final", "final", "final", "final", "missing"]),
+            ("ETHUSDT", ["final", "absent", "final", "final", "missing"]),
+            (
+                "BNBUSDT",
+                ["final", "synthetic:pending", "final", "final", "pending"],
+            ),
+            ("OLDUSDT", ["final", "final", "final", "final", "missing"]),
+        ] {
+            for (i, expected) in expected.into_iter().enumerate() {
+                let open = (i as i64 + 1) * 60000;
+                let rows = packet["klines"][symbol].as_array().unwrap();
+                let actual = if let Some(index) = rows.iter().position(|row| row[0] == open) {
+                    let evidence = packet["evidence"][symbol][index].as_str().unwrap();
+                    if packet["synthetic"][symbol]
+                        .as_array()
+                        .unwrap()
+                        .contains(&json!(open))
+                    {
+                        format!("synthetic:{evidence}")
+                    } else {
+                        evidence.into()
+                    }
+                } else if packet["absent"][symbol]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(open))
+                {
+                    "absent".into()
+                } else if packet["missing"][symbol]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(open))
+                {
+                    "missing".into()
+                } else {
+                    "outside".into()
+                };
+                if actual != expected {
+                    return false;
+                }
+            }
+        }
+        packet["klines"]["BTCUSDT"][0][1] == "10.000"
+            && packet["status"]["UNKNOWNUSDT"]["state"] == "unknown"
+            && packet["klines"]["UNKNOWNUSDT"] == json!([])
+    }
+    let (e, clock) = fixture();
+    let id = e
+        .catalog
+        .find(Market::Future, Interval::parse("1m").unwrap(), "BNBUSDT")
+        .unwrap();
+    let mut bar = e.catalog.slot(id).get(240000).unwrap().0;
+    bar.open_time = 300000;
+    bar.close_time = 359999;
+    e.commit(
+        id,
+        Update {
+            bar,
+            closed: false,
+            source: Source::Rest,
+            event_time: None,
+            sequence: 0,
+        },
+    )
+    .unwrap();
+    clock.0.store(360500, Ordering::Relaxed);
+    let (status, original) = get(e, &query()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(literal_matches(&original));
+    for case in 0..5 {
+        let mut bad = original.clone();
+        match case {
+            0 => {
+                bad["klines"]["BTCUSDT"].as_array_mut().unwrap().remove(0);
+                bad["evidence"]["BTCUSDT"].as_array_mut().unwrap().remove(0);
+                bad["absent"]["BTCUSDT"] = json!([60000]);
+            }
+            1 => bad["klines"]["BTCUSDT"][0][1] = json!("10.001"),
+            2 => bad["evidence"]["BNBUSDT"][1] = json!("final"),
+            3 => bad["evidence"]["BNBUSDT"][4] = json!("final"),
+            _ => {
+                bad["status"].as_object_mut().unwrap().remove("BTCUSDT");
+            }
+        }
+        assert!(!literal_matches(&bad), "negative case {case}");
+    }
+}

@@ -156,13 +156,107 @@ impl EvidenceResponse {
 pub(crate) struct EvidenceStamp {
     pub trusted: bool,
     pub breaker_generation: u64,
-    pub retained_generation: u64,
     pub catalog_generation: u64,
-    pub generations: Vec<u64>,
+    pub generations: Vec<(Option<i64>, u64, u64)>,
+    pub symbols: Vec<String>,
+    pub directory: Vec<(Option<usize>, SymbolStatus)>,
+    pub instruments: Vec<Option<crate::Instrument>>,
     pub observed_at: i64,
     pub valid_until: i64,
 }
+#[derive(Debug, thiserror::Error)]
+#[error("evidence selection or boundary expired")]
+struct StaleEvidence;
+pub(crate) fn stale_evidence() -> ServiceError {
+    ServiceError::Worker(StaleEvidence.into())
+}
+pub(crate) fn is_stale_evidence(error: &ServiceError) -> bool {
+    matches!(error, ServiceError::Worker(e) if e.is::<StaleEvidence>())
+}
 impl Engine {
+    pub(crate) fn evidence_key(
+        &self,
+        query: &crate::BulkQuery,
+        interval: kline_core::Interval,
+        now: i64,
+    ) -> (Key, std::sync::Arc<[String]>) {
+        self.evidence_key_snapshot(query, interval, now, || {})
+    }
+    fn evidence_key_snapshot(
+        &self,
+        query: &crate::BulkQuery,
+        interval: kline_core::Interval,
+        now: i64,
+        after_ids: impl FnOnce(),
+    ) -> (Key, std::sync::Arc<[String]>) {
+        let _writer = self.evidence.catalog_writer.lock();
+        let mut symbols = if query.symbols.is_empty() {
+            self.catalog
+                .instruments()
+                .into_iter()
+                .filter(|i| i.market == query.market && i.interval == interval)
+                .map(|i| i.symbol)
+                .collect::<Vec<_>>()
+        } else {
+            query
+                .symbols
+                .iter()
+                .map(|s| crate::http_compat::java_trim(s).to_owned())
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+        symbols.sort();
+        symbols.dedup();
+        let ids = symbols
+            .iter()
+            .filter_map(|s| self.catalog.find(query.market, interval, s))
+            .filter(|&id| self.catalog.slot(id).is_tracked())
+            .collect::<Vec<_>>()
+            .into();
+        after_ids();
+        (
+            Key {
+                market: query.market,
+                interval,
+                limit: query.limit.unwrap_or(5).clamp(1, 100) as usize,
+                closed_only: true,
+                ids,
+                boundary: interval.boundary(now),
+                revision: self.catalog.generation(),
+            },
+            symbols.into(),
+        )
+    }
+    fn evidence_directory_entry(
+        &self,
+        key: &Key,
+        symbol: &str,
+        now: i64,
+        retained: &BTreeMap<String, RetainedRecord>,
+    ) -> (Option<usize>, SymbolStatus) {
+        let id = self
+            .catalog
+            .find(key.market, key.interval, symbol)
+            .filter(|&id| self.catalog.slot(id).is_tracked());
+        let status = if let Some(id) = id {
+            let slot = self.catalog.slot(id);
+            if slot.is_trading() {
+                SymbolStatus::Trading
+            } else if retained.get(symbol).is_some_and(|r| r.expires_ms <= now) {
+                SymbolStatus::Unknown
+            } else {
+                SymbolStatus::NotTrading {
+                    since: retained
+                        .get(symbol)
+                        .map_or_else(|| slot.not_trading_since().unwrap_or(now), |r| r.since),
+                    delivery_ms: retained.get(symbol).and_then(|r| r.delivery_ms),
+                }
+            }
+        } else {
+            SymbolStatus::Unknown
+        };
+        (id, status)
+    }
     pub fn retained_records(&self) -> Vec<RetainedRecord> {
         self.evidence.retained.read().values().cloned().collect()
     }
@@ -196,6 +290,15 @@ impl Engine {
         stamp: &EvidenceStamp,
         now: i64,
     ) -> bool {
+        let _writer = self.evidence.catalog_writer.lock();
+        let retained = self.evidence.retained.read();
+        let definitions: BTreeMap<_, _> = self
+            .catalog
+            .instruments()
+            .into_iter()
+            .filter(|i| i.market == key.market && i.interval == key.interval)
+            .map(|i| (i.symbol.clone(), i))
+            .collect();
         let (generation, breaker) = self.breaker_snapshot();
         let trusted = breaker.ws_final_trusted(
             self.now_ms(),
@@ -205,16 +308,26 @@ impl Engine {
             && now < stamp.valid_until
             && trusted == stamp.trusted
             && generation == stamp.breaker_generation
-            && self.evidence.retained_generation.load(Ordering::Acquire)
-                == stamp.retained_generation
-            && self.catalog.generation() == stamp.catalog_generation
             && key.revision == stamp.catalog_generation
-            && key.ids.len() == stamp.generations.len()
-            && key
-                .ids
+            && stamp
+                .symbols
                 .iter()
-                .zip(&stamp.generations)
-                .all(|(&id, &g)| self.catalog.slot(id).window_generation() == g)
+                .map(|s| definitions.get(s))
+                .eq(stamp.instruments.iter().map(Option::as_ref))
+            && stamp
+                .symbols
+                .iter()
+                .map(|s| self.evidence_directory_entry(key, s, now, &retained))
+                .eq(stamp.directory.iter().cloned())
+            && key.ids.len() == stamp.generations.len()
+            && key.ids.iter().zip(&stamp.generations).all(|(&id, &g)| {
+                self.catalog.slot(id).select_bars(|series| {
+                    series.evidence_window_stamp(
+                        key.boundary - key.limit as i64 * 60_000,
+                        key.boundary - 60_000,
+                    )
+                }) == g
+            })
     }
     pub(crate) fn build_evidence_body(
         &self,
@@ -222,8 +335,33 @@ impl Engine {
         symbols: &[String],
         waited_ms: u64,
     ) -> Result<BulkReply, ServiceError> {
+        self.build_evidence_snapshot(key, symbols, waited_ms, || {})
+    }
+    fn build_evidence_snapshot(
+        &self,
+        key: &Key,
+        symbols: &[String],
+        waited_ms: u64,
+        after_stamps: impl FnOnce(),
+    ) -> Result<BulkReply, ServiceError> {
         let _catalog = self.evidence.catalog_writer.lock();
         let now = self.bulk_now_ms().max(key.boundary);
+        if key.interval.boundary(now) != key.boundary {
+            return Err(stale_evidence());
+        }
+        let current_ids = symbols
+            .iter()
+            .filter_map(|s| self.catalog.find(key.market, key.interval, s))
+            .filter(|&id| self.catalog.slot(id).is_tracked())
+            .collect::<Vec<_>>();
+        if current_ids.as_slice() != key.ids.as_ref() {
+            return Err(stale_evidence());
+        }
+        let mapping: BTreeMap<_, _> = key
+            .ids
+            .iter()
+            .map(|&id| (self.catalog.slot(id).symbol.to_string(), id))
+            .collect();
         let (breaker_generation, breaker) = self.breaker_snapshot();
         let trusted = breaker.ws_final_trusted(
             self.now_ms(),
@@ -253,8 +391,11 @@ impl Engine {
         let mut finalized = true;
         let mut generations = Vec::new();
         for &id in key.ids.iter() {
-            generations.push(self.catalog.slot(id).window_generation());
+            generations.push(self.catalog.slot(id).select_bars(|series| {
+                series.evidence_window_stamp(response.window.first_open, response.window.last_open)
+            }));
         }
+        after_stamps();
         for symbol in symbols {
             let mut rows = Vec::new();
             let mut kinds = Vec::new();
@@ -262,14 +403,12 @@ impl Engine {
             let mut missing = Vec::new();
             let mut synthetic = Vec::new();
             let mut covered_from = None;
-            let status = if let Some(id) = self
-                .catalog
-                .find(key.market, key.interval, symbol)
-                .filter(|&id| {
-                    self.catalog.slot(id).is_tracked()
-                        && (self.catalog.slot(id).is_trading()
-                            || retained.get(symbol).is_none_or(|r| r.expires_ms > now))
-                }) {
+            let status = if let Some(&id) = mapping.get(symbol).filter(|_| {
+                !matches!(
+                    self.evidence_directory_entry(key, symbol, now, &retained).1,
+                    SymbolStatus::Unknown
+                )
+            }) {
                 let slot = self.catalog.slot(id);
                 let status = if slot.is_trading() {
                     SymbolStatus::Trading
@@ -334,14 +473,32 @@ impl Engine {
             response.synthetic.insert(symbol.clone(), synthetic);
             response.covered_from.insert(symbol.clone(), covered_from);
         }
+        if response.klines.values().map(Vec::len).sum::<usize>() > 75_000 {
+            return Err(ServiceError::Evidence);
+        }
         response.validate().map_err(ServiceError::Worker)?;
         let body: bytes::Bytes = serde_json::to_vec(&response)?.into();
+        let definitions: BTreeMap<_, _> = self
+            .catalog
+            .instruments()
+            .into_iter()
+            .filter(|i| i.market == key.market && i.interval == key.interval)
+            .map(|i| (i.symbol.clone(), i))
+            .collect();
         let stamp = EvidenceStamp {
             trusted,
             breaker_generation,
-            retained_generation: self.evidence.retained_generation.load(Ordering::Acquire),
             catalog_generation: key.revision,
-            generations: generations.clone(),
+            generations,
+            symbols: symbols.to_vec(),
+            instruments: symbols
+                .iter()
+                .map(|s| definitions.get(s).cloned())
+                .collect(),
+            directory: symbols
+                .iter()
+                .map(|s| self.evidence_directory_entry(key, s, now, &retained))
+                .collect(),
             observed_at: now,
             valid_until: retained
                 .values()
@@ -518,5 +675,268 @@ mod flight_tests {
         };
         assert!(!Arc::ptr_eq(&a.cell, &b.cell));
         assert!(!Arc::ptr_eq(&a.cell, &c.cell));
+    }
+    fn query(symbols: &[&str], limit: i32) -> crate::BulkQuery {
+        crate::BulkQuery {
+            market: Market::Future,
+            interval: "1m".into(),
+            limit: Some(limit),
+            closed_only: true,
+            symbols: symbols.iter().map(|s| (*s).to_owned()).collect(),
+        }
+    }
+    fn update(open: i64, value: &str, source: Source) -> Update {
+        let mut bar = Bar {
+            open_time: open,
+            close_time: open + 59999,
+            trades: 1,
+            ..Bar::default()
+        };
+        bar.set_numbers(NumberType::String, [value; 8]).unwrap();
+        Update {
+            bar,
+            closed: false,
+            source,
+            event_time: None,
+            sequence: 0,
+        }
+    }
+    #[tokio::test]
+    async fn fix1_forming_updates_during_build_preserve_window_but_inside_updates_invalidate() {
+        let (e, _, key, symbols) = setup();
+        e.commit(0, update(180000, "1", Source::Rest)).unwrap();
+        for n in 0..8 {
+            let reply = e
+                .build_evidence_snapshot(&key, &symbols, 0, || {
+                    for j in 0..20 {
+                        e.commit(
+                            0,
+                            update(300000, &(n * 20 + j + 2).to_string(), Source::Stream),
+                        )
+                        .unwrap();
+                    }
+                })
+                .unwrap();
+            assert!(e.reply_current(&key, &reply, e.bulk_now_ms()));
+            e.cache
+                .put_evidence(key.clone(), symbols.clone(), Arc::new(reply));
+            assert!(e.bulk_with_evidence(query(&["BTCUSDT"], 5)).await.is_ok());
+        }
+        let reply = e.build_evidence_body(&key, &symbols, 0).unwrap();
+        let breaker = e.breaker_snapshot();
+        e.commit(0, update(180000, "999", Source::Rest)).unwrap();
+        assert_eq!(e.breaker_snapshot(), breaker);
+        assert!(!e.reply_current(&key, &reply, e.bulk_now_ms()));
+    }
+    #[test]
+    fn fix1_ids_and_revision_are_selected_under_one_directory_lock() {
+        let (e, _, _, _) = setup();
+        let before = e.catalog.generation();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut writer = None;
+        let (key, symbols) = e.evidence_key_snapshot(
+            &query(&["NEWUSDT"], 1),
+            Interval::parse("1m").unwrap(),
+            e.bulk_now_ms(),
+            || {
+                let e = e.clone();
+                writer = Some(std::thread::spawn(move || {
+                    tx.send(e.evidence.catalog_writer.try_lock().is_none())
+                        .unwrap();
+                    let mut definitions = e.catalog.instruments();
+                    let mut new = definitions[0].clone();
+                    new.symbol = "NEWUSDT".into();
+                    new.continuous = Some(("NEWUSDT".into(), "PERPETUAL".into()));
+                    definitions.push(new);
+                    e.refresh_catalog(definitions).unwrap();
+                }));
+                assert!(rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap());
+            },
+        );
+        writer.unwrap().join().unwrap();
+        assert!(key.ids.is_empty());
+        assert_eq!(key.revision, before);
+        assert!(is_stale_evidence(
+            &e.build_evidence_body(&key, &symbols, 0).unwrap_err()
+        ));
+        let (new, _) = e.evidence_key(&query(&["NEWUSDT"], 1), key.interval, e.bulk_now_ms());
+        assert_eq!(new.ids.len(), 1);
+        assert!(new.revision > key.revision);
+    }
+    #[test]
+    fn fix1_unrelated_catalog_and_retained_changes_do_not_invalidate_requested_symbols() {
+        let (e, _, key, symbols) = setup();
+        let reply = e.build_evidence_body(&key, &symbols, 0).unwrap();
+        let mut definitions = e.catalog.instruments();
+        let mut other = definitions[0].clone();
+        other.symbol = "OTHERUSDT".into();
+        other.continuous = Some(("OTHERUSDT".into(), "PERPETUAL".into()));
+        definitions.push(other);
+        e.refresh_catalog(definitions.clone()).unwrap();
+        e.restore_retained(vec![RetainedRecord {
+            symbol: "OTHERUSDT".into(),
+            pair: "OTHERUSDT".into(),
+            contract_type: "PERPETUAL".into(),
+            since: 300000,
+            expires_ms: 400000,
+            delivery_ms: None,
+        }]);
+        assert!(e.reply_current(&key, &reply, e.bulk_now_ms()));
+        definitions[0].continuous = Some(("BTCUSDT".into(), "TRADIFI_PERPETUAL".into()));
+        e.refresh_catalog(definitions.clone()).unwrap();
+        assert!(!e.reply_current(&key, &reply, e.bulk_now_ms()));
+        let reply = e.build_evidence_body(&key, &symbols, 0).unwrap();
+        definitions[0].trading = false;
+        e.refresh_catalog(definitions).unwrap();
+        assert!(!e.reply_current(&key, &reply, e.bulk_now_ms()));
+    }
+    #[tokio::test]
+    async fn fix1_build_queued_across_boundary_reselects_window_instead_of_failing() {
+        let (e, clock, _, _) = setup();
+        clock.0.store(359700, Ordering::Relaxed);
+        let (entered, mut ready) = tokio::sync::mpsc::unbounded_channel();
+        let mut releases = Vec::new();
+        let mut blockers = Vec::new();
+        for _ in 0..2 {
+            let (release, rx) = std::sync::mpsc::channel();
+            releases.push(release);
+            let e = e.clone();
+            let entered = entered.clone();
+            blockers.push(tokio::spawn(async move {
+                e.builds
+                    .run(false, move || {
+                        entered.send(()).unwrap();
+                        rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+                    })
+                    .await
+                    .unwrap();
+            }));
+        }
+        ready.recv().await.unwrap();
+        ready.recv().await.unwrap();
+        let request = {
+            let e = e.clone();
+            tokio::spawn(async move { e.bulk_with_evidence(query(&["BTCUSDT"], 1)).await })
+        };
+        for _ in 0..1000 {
+            if e.inflight_holders() > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(e.inflight_holders(), 1);
+        e.commit_evidence(
+            0,
+            kline_core::evidence::EvidenceUpdate::Rest(update(300000, "1", Source::Rest).bar),
+        )
+        .unwrap();
+        clock.0.store(360100, Ordering::Relaxed);
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        let reply = request.await.unwrap().unwrap();
+        assert_eq!(reply.boundary, 360000);
+        let body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(body["window"]["last_open"], 300000);
+        for blocker in blockers {
+            blocker.await.unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn fix1_actual_row_budget_allows_747_trading_plus_four_empty_retained_and_unknowns() {
+        let (source, clock, _, _) = setup();
+        let boundary = 500 * 60_000;
+        clock.0.store(boundary + 10000, Ordering::Relaxed);
+        let template = source.catalog.instruments().remove(0);
+        let definitions = (0..751)
+            .map(|i| {
+                let mut d = template.clone();
+                d.symbol = format!("COIN{i}");
+                d.continuous = Some((d.symbol.clone(), "PERPETUAL".into()));
+                d.trading = i < 747;
+                d
+            })
+            .collect();
+        let e = Engine::new(
+            Catalog::new(definitions).unwrap(),
+            clock,
+            source.settings().clone(),
+        );
+        e.restore_retained(
+            e.catalog
+                .instruments()
+                .into_iter()
+                .filter(|i| !i.trading)
+                .map(|i| RetainedRecord {
+                    pair: i.symbol.clone(),
+                    symbol: i.symbol,
+                    contract_type: "PERPETUAL".into(),
+                    since: boundary,
+                    expires_ms: boundary + 241 * 60000,
+                    delivery_ms: None,
+                })
+                .collect(),
+        );
+        for (id, _) in e
+            .catalog
+            .slots()
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| slot.is_trading())
+        {
+            for open in (boundary - 100 * 60000..boundary).step_by(60000) {
+                e.commit_evidence(
+                    id,
+                    kline_core::evidence::EvidenceUpdate::Rest(update(open, "1", Source::Rest).bar),
+                )
+                .unwrap();
+            }
+        }
+        let reply = e.bulk_with_evidence(query(&[], 100)).await.unwrap();
+        let body: EvidenceResponse = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(body.status.len(), 751);
+        assert_eq!(body.klines.values().map(Vec::len).sum::<usize>(), 74700);
+        let mut all: Vec<_> = e
+            .catalog
+            .instruments()
+            .into_iter()
+            .map(|i| i.symbol)
+            .collect();
+        all.push("UNKNOWN".into());
+        let request = crate::BulkQuery {
+            symbols: all,
+            ..query(&[], 100)
+        };
+        assert!(e.bulk_with_evidence(request).await.is_ok());
+        for (id, _) in e
+            .catalog
+            .slots()
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| !slot.is_trading())
+        {
+            for open in (boundary - 100 * 60000..boundary).step_by(60000) {
+                e.commit_evidence(
+                    id,
+                    kline_core::evidence::EvidenceUpdate::Rest(update(open, "1", Source::Rest).bar),
+                )
+                .unwrap();
+            }
+        }
+        assert!(matches!(
+            e.bulk_with_evidence(query(&[], 100)).await,
+            Err(ServiceError::Evidence)
+        ));
+    }
+    #[test]
+    fn fix1_same_bytes_replacing_a_synthetic_flag_invalidates_the_window() {
+        let (e, _, key, symbols) = setup();
+        e.commit(0, update(180000, "1", Source::Synthetic)).unwrap();
+        let reply = e.build_evidence_body(&key, &symbols, 0).unwrap();
+        let before = e.catalog.slot(0).window_generation();
+        e.commit(0, update(180000, "1", Source::Rest)).unwrap();
+        assert!(!e.catalog.slot(0).evidence_record(180000).synthetic);
+        assert!(e.catalog.slot(0).window_generation() > before);
+        assert!(!e.reply_current(&key, &reply, e.bulk_now_ms()));
     }
 }

@@ -648,3 +648,99 @@ async fn stale_cold_response_retains_its_actual_window_instead_of_discarding_old
     );
     assert_eq!(server.mock.queries.lock()[0]["limit"], "241");
 }
+
+#[tokio::test]
+async fn fix1_invalid_rest_successor_left_anchor_and_tail_publish_nothing() {
+    use kline_service::BulkQuery;
+    for case in 0..3 {
+        let (e, _) = engine(true, &["BTCUSDT"]);
+        for open in [B - 3 * M, B - 2 * M, B - M] {
+            observation(&e, open, "1", true);
+        }
+        e.bulk_with_evidence(BulkQuery {
+            market: Market::Future,
+            interval: "1m".into(),
+            limit: Some(3),
+            closed_only: true,
+            symbols: vec!["BTCUSDT".into()],
+        })
+        .await
+        .unwrap();
+        let slot = e.catalog.slot(0);
+        let snapshot = || {
+            (
+                format!(
+                    "{:?}",
+                    slot.select_bars(|s| (B - 240 * M..=B)
+                        .step_by(M as usize)
+                        .map(|t| s.evidence_record(t))
+                        .collect::<Vec<_>>())
+                ),
+                slot.window_generation(),
+                slot.durable_generation(),
+                slot.gap_generation(),
+                slot.tracking_generation(),
+                e.breaker_snapshot(),
+                e.gap_epoch(),
+                e.cache_sizes(),
+                slot.select_bars(|s| s.evidence_window_stamp(B - 240 * M, B)),
+            )
+        };
+        let before = snapshot();
+        let rows = match case {
+            0 => vec![bar(B - M, "2"), bar(B + 1, "3")],
+            1 => vec![
+                bar(B - 98 * M + 1, "2"),
+                bar(B - 97 * M, "3"),
+                bar(B - M, "4"),
+                bar(B, "5"),
+            ],
+            _ => vec![bar(B - 3 * M, "2"), bar(B - M, "3"), bar(B + 1, "4")],
+        };
+        let mock = server(rows).await;
+        let r = recovery(e.clone(), &mock);
+        assert!(r.sync(0, case == 1).await.is_err(), "case {case}");
+        assert_eq!(
+            snapshot(),
+            before,
+            "case {case} published part of an invalid page"
+        );
+    }
+}
+
+#[tokio::test]
+async fn fix1_routine_without_forming_uses_99_minutes_and_keeps_both_anchors() {
+    let (e, _) = engine(true, &["BTCUSDT"]);
+    for open in (B - 240 * M..B).step_by(M as usize) {
+        e.commit_evidence(0, EvidenceUpdate::Rest(bar(open, "1")))
+            .unwrap();
+    }
+    // A markers must not shift a request whose window is expressed in minutes.
+    e.commit_evidence(0, EvidenceUpdate::Absent(B - 50 * M))
+        .unwrap();
+    let mock = server(
+        (B - 98 * M..=B)
+            .step_by(M as usize)
+            .filter(|&t| t != B - 97 * M)
+            .map(|t| bar(t, "2"))
+            .collect(),
+    )
+    .await;
+    let r = recovery(e.clone(), &mock);
+    let plan = r.evidence_sync_request(0, true, B + 1500);
+    assert_eq!(plan.start, Some(B - 98 * M));
+    assert_eq!(plan.range.first, B - 97 * M);
+    assert_eq!(plan.range.last, B - M);
+    assert_eq!(plan.limit, 99);
+    assert_eq!(plan.end, B + 1500);
+    r.sync(0, true).await.unwrap();
+    assert_eq!(
+        e.catalog.slot(0).evidence_record(B - 97 * M).state,
+        EvidenceState::Absent
+    );
+    assert_eq!(
+        e.catalog.slot(0).evidence_record(B - M).state,
+        EvidenceState::RestFinal
+    );
+    assert_eq!(mock.mock.queries.lock()[0]["limit"], "99");
+}
