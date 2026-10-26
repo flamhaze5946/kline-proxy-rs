@@ -34,4 +34,6 @@ Reset only while offline, in this order:
 
 Reset clears only `last_conflict_ms`; it preserves a readable `revised_total`. If the previous counter is unreadable, the command explicitly reports that it uses zero. It never changes retained records. It refuses to run against an active service.
 
+Shutdown performs a final state flush after all producers and the snapshot writer finish. If a state write fails, shutdown keeps the directory locked and retries until that final flush succeeds.
+
 Snapshots retain the 0.4.24 format. Confirmed absences are omitted and cannot be merged back from an older snapshot. Every restored row is pending until the startup full-window REST request or another qualifying observation provides fresh evidence.

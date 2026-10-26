@@ -118,20 +118,36 @@ impl StateDirectory {
         mut finish: tokio::sync::watch::Receiver<bool>,
     ) {
         loop {
+            // A shutdown requested during an earlier pass still needs its own
+            // flush: that earlier snapshot can precede the last WS conflict.
+            let final_pass = *finish.borrow();
             let directory = self.clone();
             let config = config.clone();
             let engine = engine.clone();
-            match tokio::task::spawn_blocking(move || directory.flush(&config, &engine)).await {
-                Ok(Ok(())) => {}
+            let persisted = match tokio::task::spawn_blocking(move || {
+                directory.flush(&config, &engine)
+            })
+            .await
+            {
+                Ok(Ok(())) => true,
                 Ok(Err(error)) => {
-                    tracing::warn!(%error,"evidence state write failed; remains dirty")
+                    tracing::warn!(%error,"evidence state write failed; remains dirty");
+                    false
                 }
-                Err(error) => tracing::error!(%error,"evidence state writer failed"),
-            }
-            if *finish.borrow() {
+                Err(error) => {
+                    tracing::error!(%error,"evidence state writer failed");
+                    false
+                }
+            };
+            if final_pass && persisted {
                 break;
             }
-            tokio::select! {_=finish.changed()=>{},_=tokio::time::sleep(Duration::from_secs(1))=>{}}
+            if final_pass {
+                // Keep the lock and dirty state until the final writes succeed.
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            } else {
+                tokio::select! {_=finish.changed()=>{},_=tokio::time::sleep(Duration::from_secs(1))=>{}}
+            }
         }
     }
 }

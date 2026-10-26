@@ -379,7 +379,15 @@ impl Engine {
             // A correction may race an in-flight build. Never let a later caller
             // inherit the completed old generation through the single-flight cell.
             if ((with_evidence || !key.closed_only)
-                && !self.reply_current(&key, &reply, self.bulk_now_ms().max(key.boundary)))
+                && !self.reply_current(
+                    &key,
+                    &reply,
+                    if with_evidence {
+                        self.bulk_now_ms().max(key.boundary)
+                    } else {
+                        self.bulk_now_ms()
+                    },
+                ))
                 || reply.payload.as_ref().is_some_and(|p| {
                     !self.payload_current(&key, p, self.bulk_now_ms().max(key.boundary))
                 })

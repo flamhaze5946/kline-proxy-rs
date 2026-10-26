@@ -445,3 +445,75 @@ fn state_loader_rejects_duplicate_catalog_keys_and_config_stays_strict() {
         .is_err()
     );
 }
+
+#[tokio::test]
+async fn shutdown_retries_failed_state_writes_without_releasing_the_directory_lock() {
+    use std::time::Duration;
+    let t = tempfile::tempdir().unwrap();
+    let c = Arc::new(config(t.path()));
+    let e = engine(&c);
+    let state = StateDirectory::load(&c, &e).unwrap();
+    std::fs::create_dir(t.path().join("breaker.json")).unwrap();
+    let (_finish, rx) = tokio::sync::watch::channel(true);
+    let mut writer = tokio::spawn(state.clone().persist(c, e, rx));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut writer)
+            .await
+            .is_err()
+    );
+    assert!(StateDirectory::lock(t.path()).is_err());
+    std::fs::remove_dir(t.path().join("breaker.json")).unwrap();
+    tokio::time::timeout(Duration::from_secs(3), writer)
+        .await
+        .unwrap()
+        .unwrap();
+    let stored: BreakerState =
+        serde_json::from_slice(&std::fs::read(t.path().join("breaker.json")).unwrap()).unwrap();
+    assert_eq!(stored.last_conflict_ms, NOW);
+    assert!(t.path().join("retained.json").is_file());
+    drop(state);
+    StateDirectory::lock(t.path()).unwrap();
+}
+
+#[tokio::test]
+async fn shutdown_during_a_flush_writes_conflicts_newer_than_that_flush_snapshot() {
+    use std::time::Duration;
+    let t = tempfile::tempdir().unwrap();
+    let c = Arc::new(config(t.path()));
+    let e = engine(&c);
+    let state = StateDirectory::load(&c, &e).unwrap();
+    // Stall only the retained part, after the pass has copied/written breaker.
+    let runtime = c.evidence.as_ref().unwrap().runtime.clone();
+    let (locked, acquired) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let blocker = std::thread::spawn(move || {
+        let _guard = runtime.lock();
+        locked.send(()).unwrap();
+        let _ = released.recv_timeout(Duration::from_secs(5));
+    });
+    acquired.recv_timeout(Duration::from_secs(1)).unwrap();
+    let (finish, rx) = tokio::sync::watch::channel(false);
+    let writer = tokio::spawn(state.persist(c, e.clone(), rx));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !t.path().join("breaker.json").is_file() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    e.restore_breaker(BreakerState {
+        last_conflict_ms: NOW + 1,
+        revised_total: 9,
+    });
+    finish.send(true).unwrap();
+    release.send(()).unwrap();
+    blocker.join().unwrap();
+    tokio::time::timeout(Duration::from_secs(3), writer)
+        .await
+        .unwrap()
+        .unwrap();
+    let stored: BreakerState =
+        serde_json::from_slice(&std::fs::read(t.path().join("breaker.json")).unwrap()).unwrap();
+    assert_eq!(stored, e.breaker_state());
+    StateDirectory::lock(t.path()).unwrap();
+}

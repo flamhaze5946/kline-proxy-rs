@@ -292,19 +292,20 @@ async fn answer(state: HttpState, market: Market, p: PostBody, with_evidence: bo
             "evidence requires enabled futures 1m closed_only",
         );
     }
-    if (with_evidence && !state.engine.evidence_catalog_loaded())
-        || (with_evidence
+    let ready = if with_evidence {
+        state.engine.evidence_catalog_loaded()
             && state
                 .readiness
                 .as_ref()
-                .is_some_and(|r| !r.evidence_query_ready()))
-        || (!with_evidence
-            && state.strict_readiness
-            && state
+                .is_none_or(|r| r.evidence_query_ready())
+    } else {
+        !state.strict_readiness
+            || state
                 .readiness
                 .as_ref()
-                .is_some_and(|r| !r.query_ready(&query)))
-    {
+                .is_none_or(|r| r.query_ready(&query))
+    };
+    if !ready {
         return error(
             StatusCode::SERVICE_UNAVAILABLE,
             -1008,
