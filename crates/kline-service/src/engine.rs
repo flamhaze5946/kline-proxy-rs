@@ -427,12 +427,11 @@ impl Engine {
             result.trimmed |= trimmed;
             result.evidence_changed |= filled || trimmed;
             // A correction cannot move a row back outside an already exposed window.
-            let boundary = self.evidence.exposed_boundary.load(Ordering::Acquire).max(
-                self.bulk_now_ms()
-                    .saturating_add(self.settings.pre_boundary_wait_ms as i64)
-                    .div_euclid(60_000)
-                    * 60_000,
-            );
+            let boundary = self
+                .evidence
+                .exposed_boundary
+                .load(Ordering::Acquire)
+                .max(self.bulk_now_ms().div_euclid(60_000) * 60_000);
             let closed_row = incoming.open_time < boundary
                 || incoming.state != kline_core::evidence::EvidenceState::Pending;
             if result.evidence_changed

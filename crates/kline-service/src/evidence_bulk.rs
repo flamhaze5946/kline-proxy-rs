@@ -1773,11 +1773,19 @@ mod flight_tests {
     }
     #[test]
     fn fix4_pre_boundary_margin_classifies_pending_updates_before_any_exposure() {
-        let (e, _, _, _) = fix4_pending_setup(299800);
+        let (e, _, mut key, symbols) = fix4_pending_setup(299800);
         assert_eq!(e.evidence.exposed_boundary.load(Ordering::Acquire), 0);
         let before = e.catalog.slot(0).closed_version.load(Ordering::Acquire);
         e.commit(0, update(240000, "2", Source::Stream)).unwrap();
-        assert!(e.catalog.slot(0).closed_version.load(Ordering::Acquire) > before);
+        assert_eq!(
+            e.catalog.slot(0).closed_version.load(Ordering::Acquire),
+            before
+        );
+        key.boundary = 240000;
+        key.limit = 1;
+        let reply = e.build_evidence_body(&key, &symbols, 0).unwrap();
+        assert_eq!(e.evidence.exposed_boundary.load(Ordering::Acquire), 240000);
+        assert!(e.reply_current(&key, &reply, e.bulk_now_ms()));
     }
     #[test]
     fn fix4_unknown_symbols_share_membership_version_without_registering_names() {
@@ -1906,5 +1914,45 @@ mod flight_tests {
                 .is_ok()
         );
         assert_eq!(e.evidence.catalog_writer.lock().len(), 1);
+    }
+    #[test]
+    fn fix5_minute_end_forming_updates_during_build_preserve_the_closed_window() {
+        let (e, clock, _, _) = setup();
+        clock.0.store(359700, Ordering::Release);
+        e.commit(0, update(300000, "1", Source::Stream)).unwrap();
+        let selection = e
+            .select_evidence(
+                &query(&["BTCUSDT"], 1),
+                Interval::parse("1m").unwrap(),
+                e.bulk_now_ms(),
+            )
+            .unwrap();
+        assert_eq!(selection.key.boundary, 300000);
+        assert_eq!(e.evidence.exposed_boundary.load(Ordering::Acquire), 300000);
+        let before = e.catalog.slot(0).closed_version.load(Ordering::Acquire);
+        let reply = e
+            .build_evidence_selected_snapshot(&selection, 0, || {
+                // Enter the former 250ms margin after selection and version capture.
+                for value in 2..=6 {
+                    clock.0.store(359800 + (value - 2) * 10, Ordering::Release);
+                    e.commit(0, update(300000, &value.to_string(), Source::Stream))
+                        .unwrap();
+                    assert_eq!(
+                        e.catalog.slot(0).closed_version.load(Ordering::Acquire),
+                        before
+                    );
+                }
+            })
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(body["window"]["last_open"], 240000);
+        assert_eq!(body["klines"]["BTCUSDT"].as_array().unwrap().len(), 1);
+        assert_eq!(body["klines"]["BTCUSDT"][0][0], 240000);
+        assert_eq!(
+            e.catalog.slot(0).evidence_record(300000).bar.unwrap(),
+            update(300000, "6", Source::Stream).bar
+        );
+        assert_eq!(e.evidence.exposed_boundary.load(Ordering::Acquire), 300000);
+        assert!(e.reply_current(&selection.key, &reply, e.bulk_now_ms()));
     }
 }
