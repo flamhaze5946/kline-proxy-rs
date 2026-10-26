@@ -101,6 +101,39 @@ async fn get(f: &Fixture, path: &str) -> (StatusCode, Value) {
 }
 
 #[tokio::test]
+async fn funding_rate_type_survives_single_and_cached_bulk_responses() {
+    let f = fixture().await;
+    let rows = json!([
+        {"symbol":"BTCUSDT","fundingTime":H+1,"fundingRate":"0.0001","rateType":"Regular"},
+        {"symbol":"ETHUSDT","fundingTime":H+1,"fundingRate":"0.0002","rateType":"FutureType"},
+        {"symbol":"BTCUSDT","fundingTime":H+2,"fundingRate":"0.0003"}
+    ]);
+    *f.mock.funding.lock().await = rows.clone();
+    let (status, single) = get(&f, "/fapi/v1/fundingRate").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(single, rows);
+
+    for _ in 0..2 {
+        let result = f
+            .app
+            .funding
+            .bulk(FundingQuery {
+                since_ms: Some(H),
+                until_ms: Some(2 * H),
+                limit: Some(10),
+                ..FundingQuery::default()
+            })
+            .await
+            .unwrap();
+        let bulk: Value = serde_json::from_slice(&result).unwrap();
+        assert_eq!(bulk["fundingRates"]["BTCUSDT"], json!([rows[0], rows[2]]));
+        assert_eq!(bulk["fundingRates"]["ETHUSDT"], json!([rows[1]]));
+    }
+    // One ordinary fetch plus one hourly load; the second bulk uses the cache.
+    assert_eq!(f.mock.calls.lock().await.len(), 2);
+}
+
+#[tokio::test]
 async fn ordinary_funding_preserves_signed_integer_limit_and_empty_arrays() {
     let f = fixture().await;
     for limit in ["-1", "0", "2147483647"] {
@@ -330,5 +363,95 @@ fn statistics_values_match_fresh_java_oracle_across_sparse_and_tied_series() {
         differences.is_empty(),
         "{}",
         serde_json::to_string_pretty(&differences).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn selected_funding_windows_match_all_market_rows_without_losing_empty_buckets() {
+    let f = fixture().await;
+    let mut rows = vec![
+        json!({"symbol":"BTCUSDT","fundingTime":2*H+2,"fundingRate":"0.05"}),
+        json!({"symbol":"BTCUSDT","fundingTime":H+3,"fundingRate":"0.03"}),
+        json!({"symbol":"BTCUSDT","fundingTime":H+1,"fundingRate":"0.01"}),
+        json!({"symbol":"BTCUSDT","fundingTime":2*H+1,"fundingRate":"0.04"}),
+        json!({"symbol":"BTCUSDT","fundingTime":H+2,"fundingRate":"0.02"}),
+        json!({"symbol":"ETHUSDT","fundingTime":2*H+1,"fundingRate":"0.06"}),
+        json!({"symbol":"OUTSIDEUSDT","fundingTime":H+1,"fundingRate":"0.07"}),
+    ];
+    // A scattered subset of a large market exercises the direct-lookup branch.
+    rows.extend(
+        (0..300).map(
+            |i| json!({"symbol":format!("OTHER{i}USDT"),"fundingTime":H+5,"fundingRate":"0.08"}),
+        ),
+    );
+    *f.mock.funding.lock().await = Value::Array(rows);
+    for limit in [1, 2, 10] {
+        let query = FundingQuery {
+            since_ms: Some(H + 2),
+            until_ms: Some(2 * H + 2),
+            limit: Some(limit),
+            ..Default::default()
+        };
+        let all: Value =
+            serde_json::from_slice(&f.app.funding.bulk(query.clone()).await.unwrap()).unwrap();
+        let selected: Value = serde_json::from_slice(
+            &f.app
+                .funding
+                .bulk(FundingQuery {
+                    symbols: Some(vec![
+                        Some(" ETHUSDT ".into()),
+                        Some("BTCUSDT".into()),
+                        Some("BTCUSDT".into()),
+                        Some("MISSINGUSDT".into()),
+                        Some("OUTSIDEUSDT".into()),
+                        None,
+                        Some(" \t".into()),
+                    ]),
+                    ..query.clone()
+                })
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(selected["fundingRates"].as_object().unwrap().len(), 4);
+        for symbol in ["BTCUSDT", "ETHUSDT", "OUTSIDEUSDT"] {
+            assert_eq!(
+                selected["fundingRates"][symbol],
+                all["fundingRates"][symbol]
+            );
+        }
+        assert_eq!(selected["fundingRates"]["MISSINGUSDT"], json!([]));
+        assert_eq!(selected["fundingRates"]["OUTSIDEUSDT"], json!([]));
+        let times: Vec<_> = selected["fundingRates"]["BTCUSDT"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["fundingTime"].as_i64().unwrap())
+            .collect();
+        let expected = [H + 2, H + 3, 2 * H + 1];
+        assert_eq!(
+            times,
+            expected[expected.len().saturating_sub(limit as usize)..]
+        );
+        let blank: Value = serde_json::from_slice(
+            &f.app
+                .funding
+                .bulk(FundingQuery {
+                    symbols: Some(vec![None, Some(" \t".into())]),
+                    ..query
+                })
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            blank["fundingRates"], all["fundingRates"],
+            "blank symbols still mean all markets"
+        );
+    }
+    assert_eq!(
+        f.mock.calls.lock().await.len(),
+        2,
+        "both branches share the two hourly cache loads"
     );
 }

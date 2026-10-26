@@ -31,6 +31,8 @@ use tower::ServiceExt;
 struct Mock {
     calls: Mutex<Vec<(String, BTreeMap<String, String>)>>,
     hold_funding: AtomicBool,
+    funding_reply: Mutex<Option<Value>>,
+    fail_funding: AtomicBool,
     large_metadata: AtomicBool,
     funding_started: Notify,
     release_funding: Notify,
@@ -83,6 +85,21 @@ async fn upstream(
         if mock.hold_funding.load(Ordering::Acquire) {
             mock.funding_started.notify_one();
             mock.release_funding.notified().await;
+        }
+        if mock.fail_funding.load(Ordering::Acquire) {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(json!({"code": -1000, "msg": "test failure"})),
+            )
+                .into_response();
+        }
+        if let Some(mut reply) = mock.funding_reply.lock().await.clone() {
+            if q.contains_key("symbol")
+                && let Some(rows) = reply.as_array_mut()
+            {
+                rows.retain(|row| row["symbol"] == symbol);
+            }
+            return axum::Json(reply).into_response();
         }
         let start = q
             .get("startTime")
@@ -1521,13 +1538,14 @@ async fn price_maintenance_prepares_and_renews_idle_snapshots_before_the_first_q
     let f = fixture_with_history(false).await;
     let (stop, stopped) = tokio::sync::watch::channel(false);
     let task = tokio::spawn(f.app.tickers.clone().run(Market::Spot, false, stopped));
-    tokio::time::timeout(Duration::from_secs(4), async {
+    tokio::time::timeout(Duration::from_secs(14), async {
         loop {
             let status = f.app.tickers.status();
             if status["spot"]["price_snapshot"]["rest_loads"]
                 .as_u64()
                 .unwrap()
-                >= 2
+                >= 4
+                && status["spot"]["price_snapshot"]["idle_refresh_ms"] == 5_000
                 && status["spot"]["price_snapshot"]["rest_age_ms"]
                     .as_u64()
                     .unwrap_or(u64::MAX)
@@ -1541,12 +1559,20 @@ async fn price_maintenance_prepares_and_renews_idle_snapshots_before_the_first_q
     .await
     .expect("idle snapshots should refresh without any request");
     let before = f.app.tickers.status()["spot"]["price_snapshot"]["rest_loads"].clone();
-    let rows = f
-        .app
-        .tickers
-        .query(Market::Spot, true, None, vec![], false, None)
-        .await
-        .unwrap();
+    f.mock.hold_price.store(true, Ordering::Release);
+    let rows = tokio::time::timeout(
+        Duration::from_millis(100),
+        f.app
+            .tickers
+            .query(Market::Spot, true, None, vec![], false, None),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        f.app.tickers.status()["spot"]["price_snapshot"]["idle_refresh_ms"],
+        2_000
+    );
     assert_eq!(
         serde_json::from_slice::<Value>(&rows).unwrap()[0]["price"],
         "100.50000000"
@@ -1684,4 +1710,138 @@ async fn metadata_maintenance_renews_idle_markets_without_a_subscription_directo
         .await
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn funding_publication_refresh_keeps_serving_and_recovers_partial_results() {
+    let f = fixture().await;
+    let start = H;
+    *f.mock.funding_reply.lock().await = Some(json!([]));
+    assert!(f.app.funding.chunk(start).await.unwrap().is_empty());
+
+    let partial = json!([{"symbol":"BTCUSDT","fundingTime":start+1,"fundingRate":"0.01"}]);
+    *f.mock.funding_reply.lock().await = Some(partial.clone());
+    f.app.funding.retry_boundary(start).await.unwrap();
+    assert_eq!(f.app.funding.chunk(start).await.unwrap().len(), 1);
+    // A successful but regressed empty response must retain published rows too.
+    *f.mock.funding_reply.lock().await = Some(json!([]));
+    f.app.funding.retry_boundary(start).await.unwrap();
+    assert_eq!(f.app.funding.chunk(start).await.unwrap().len(), 1);
+    let before = f.app.funding.upstream_loads.load(Ordering::Relaxed);
+
+    // A failed refresh must not invalidate the last usable snapshot.
+    f.mock.fail_funding.store(true, Ordering::Release);
+    assert!(f.app.funding.retry_boundary(start).await.is_err());
+    assert_eq!(f.app.funding.chunk(start).await.unwrap().len(), 1);
+    f.mock.fail_funding.store(false, Ordering::Release);
+    assert_eq!(
+        f.app.funding.upstream_loads.load(Ordering::Relaxed),
+        before + 1
+    );
+
+    let complete = json!([
+        {"symbol":"BTCUSDT","fundingTime":start+1,"fundingRate":"0.03"},
+        {"symbol":"ETHUSDT","fundingTime":start+1,"fundingRate":"0.02"}
+    ]);
+    *f.mock.funding_reply.lock().await = Some(complete);
+    f.mock.hold_funding.store(true, Ordering::Release);
+    let funding = f.app.funding.clone();
+    let refresh = tokio::spawn(async move { funding.retry_boundary(start).await });
+    tokio::time::timeout(Duration::from_secs(2), f.mock.funding_started.notified())
+        .await
+        .unwrap();
+    let before = f.app.funding.upstream_loads.load(Ordering::Relaxed);
+    // 192 clients do not duplicate the background request or wait for it.
+    let mut clients = Vec::new();
+    for _ in 0..192 {
+        let funding = f.app.funding.clone();
+        clients.push(tokio::spawn(
+            async move { funding.chunk(start).await.unwrap() },
+        ));
+    }
+    for client in clients {
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), client)
+                .await
+                .unwrap()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    assert_eq!(f.app.funding.upstream_loads.load(Ordering::Relaxed), before);
+    f.mock.hold_funding.store(false, Ordering::Release);
+    f.mock.release_funding.notify_one();
+    refresh.await.unwrap().unwrap();
+    let refreshed = f.app.funding.chunk(start).await.unwrap();
+    assert_eq!(refreshed.len(), 2);
+    assert_eq!(
+        refreshed["BTCUSDT"][0].funding_rate.as_deref(),
+        Some("0.03")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn funding_publication_retry_joins_inflight_cold_load() {
+    let f = fixture().await;
+    f.mock.hold_funding.store(true, Ordering::Release);
+    let funding = f.app.funding.clone();
+    let first = tokio::spawn(async move { funding.chunk(H).await });
+    tokio::time::timeout(Duration::from_secs(2), f.mock.funding_started.notified())
+        .await
+        .unwrap();
+    let mut retry = Box::pin(f.app.funding.retry_boundary(H));
+    assert!(futures_util::poll!(retry.as_mut()).is_pending());
+    f.mock.hold_funding.store(false, Ordering::Release);
+    f.mock.release_funding.notify_one();
+    first.await.unwrap().unwrap();
+    retry.await.unwrap();
+    assert_eq!(f.app.funding.upstream_loads.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn funding_noop_publication_preserves_recent_symbols_but_changes_and_forced_retry_expire_them()
+ {
+    let f = fixture().await;
+    let rows = |rate: &str| {
+        json!([
+            {"symbol":"BTCUSDT","fundingTime":H+1,"fundingRate":rate},
+            {"symbol":"ETHUSDT","fundingTime":H+1,"fundingRate":rate}
+        ])
+    };
+    *f.mock.funding_reply.lock().await = Some(rows("0.01"));
+    f.app.funding.chunk(H).await.unwrap();
+    let query = FundingQuery {
+        symbols: Some(vec![Some("BTCUSDT".into()), Some("ETHUSDT".into())]),
+        ..Default::default()
+    };
+    f.app.funding.bulk(query.clone()).await.unwrap();
+    let before = f.app.funding.upstream_loads.load(Ordering::Relaxed);
+    for _ in 0..7 {
+        f.app.funding.retry_boundary(H).await.unwrap();
+        f.app.funding.bulk(query.clone()).await.unwrap();
+    }
+    assert_eq!(
+        f.app.funding.upstream_loads.load(Ordering::Relaxed),
+        before + 7,
+        "unchanged publication retries must not invalidate either symbol cache"
+    );
+    *f.mock.funding_reply.lock().await = Some(rows("0.02"));
+    f.app.funding.retry_boundary(H).await.unwrap();
+    let response: Value =
+        serde_json::from_slice(&f.app.funding.bulk(query.clone()).await.unwrap()).unwrap();
+    for symbol in ["BTCUSDT", "ETHUSDT"] {
+        assert_eq!(response["fundingRates"][symbol][0]["fundingRate"], "0.02");
+    }
+    assert_eq!(
+        f.app.funding.upstream_loads.load(Ordering::Relaxed),
+        before + 10
+    );
+    f.app.funding.force_retry_boundary(H).await.unwrap();
+    f.app.funding.bulk(query).await.unwrap();
+    assert_eq!(
+        f.app.funding.upstream_loads.load(Ordering::Relaxed),
+        before + 13,
+        "the :05 forced retry retains its independent recent-symbol refresh"
+    );
 }

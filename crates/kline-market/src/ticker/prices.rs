@@ -16,6 +16,7 @@ use tokio::{
 
 const REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 const IDLE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const MAX_IDLE_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const PUBLISH_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_RENDER_AGE: Duration = Duration::from_millis(250);
 // A bounded grace for rows without a current stream observation, including retired pairs.
@@ -56,11 +57,16 @@ pub(super) struct Prices {
     refresh: Mutex<()>,
     publish: Mutex<()>,
     access: AtomicU64,
+    idle_refresh_ms: AtomicU64,
     wake_refresh: Notify,
     wake_publish: Notify,
     rest_loads: AtomicU64,
     publications: AtomicU64,
     unavailable: AtomicU64,
+    #[cfg(test)]
+    refresh_checks: AtomicU64,
+    #[cfg(test)]
+    publish_checks: AtomicU64,
 }
 impl Prices {
     pub(super) fn new() -> Self {
@@ -70,16 +76,40 @@ impl Prices {
             refresh: Mutex::new(()),
             publish: Mutex::new(()),
             access: AtomicU64::new(0),
+            idle_refresh_ms: AtomicU64::new(IDLE_REFRESH_INTERVAL.as_millis() as u64),
             wake_refresh: Notify::new(),
             wake_publish: Notify::new(),
             rest_loads: AtomicU64::new(0),
             publications: AtomicU64::new(0),
             unavailable: AtomicU64::new(0),
+            #[cfg(test)]
+            refresh_checks: AtomicU64::new(0),
+            #[cfg(test)]
+            publish_checks: AtomicU64::new(0),
         }
     }
     fn active(&self) -> bool {
         let access = self.access.load(Ordering::Relaxed);
         access != 0 && (crate::funding::now() as u64).saturating_sub(access) <= ACTIVE_MS
+    }
+    fn reset_idle_refresh(&self) {
+        self.idle_refresh_ms
+            .store(IDLE_REFRESH_INTERVAL.as_millis() as u64, Ordering::Relaxed);
+    }
+    fn backoff_idle_refresh(&self) {
+        let _ = self
+            .idle_refresh_ms
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |ms| {
+                Some((ms + 1_000).min(MAX_IDLE_REFRESH_INTERVAL.as_millis() as u64))
+            });
+    }
+    fn refresh_interval(&self) -> Duration {
+        if self.active() {
+            self.reset_idle_refresh();
+            REFRESH_INTERVAL
+        } else {
+            Duration::from_millis(self.idle_refresh_ms.load(Ordering::Relaxed))
+        }
     }
     fn cached(&self) -> Option<Bytes> {
         self.published
@@ -104,7 +134,8 @@ impl Prices {
             "publications":self.publications.load(Ordering::Relaxed),
             "unavailable":self.unavailable.load(Ordering::Relaxed),
             "refresh_priority":"PriceRefresh",
-            "idle_refresh_ms":IDLE_REFRESH_INTERVAL.as_millis() as u64,
+            "idle_refresh_ms":self.idle_refresh_ms.load(Ordering::Relaxed),
+            "max_idle_refresh_ms":MAX_IDLE_REFRESH_INTERVAL.as_millis() as u64,
         })
     }
 }
@@ -165,7 +196,9 @@ impl Tickers {
         prices
             .access
             .store(crate::funding::now() as u64, Ordering::Relaxed);
+        prices.reset_idle_refresh();
         prices.wake_refresh.notify_one();
+        prices.wake_publish.notify_one();
         if prices.baseline.load().is_none() {
             // Bootstrap alone needs the authoritative ordering. An established
             // list can omit a newly available symbol: keep stable known order,
@@ -231,6 +264,7 @@ impl Tickers {
         let prices = &self.prices[market as usize];
         let now = crate::funding::now() as u64;
         let previous = prices.access.swap(now, Ordering::Relaxed);
+        prices.reset_idle_refresh();
         if previous == 0 || now.saturating_sub(previous) > ACTIVE_MS {
             prices.wake_refresh.notify_one();
             prices.wake_publish.notify_one();
@@ -265,27 +299,54 @@ impl Tickers {
     }
     pub(super) async fn run_price_refresh(&self, market: Market, mut stop: watch::Receiver<bool>) {
         let prices = &self.prices[market as usize];
+        let mut retry_after = None;
         while !*stop.borrow() {
-            let due = prices.baseline.load().as_ref().is_none_or(|baseline| {
-                baseline.loaded.elapsed()
-                    >= if prices.active() {
-                        REFRESH_INTERVAL
-                    } else {
-                        IDLE_REFRESH_INTERVAL
-                    }
-            });
-            if due {
-                tokio::select! {
-                    _ = stop.changed() => break,
-                    result = self.refresh_prices(market) => {
-                        if let Err(error) = result { tracing::warn!(?market,%error,"price snapshot refresh failed"); }
-                    }
-                }
-            }
+            #[cfg(test)]
+            prices.refresh_checks.fetch_add(1, Ordering::Relaxed);
+            let interval = prices.refresh_interval();
+            let due = prices
+                .baseline
+                .load()
+                .as_ref()
+                .map_or_else(Instant::now, |baseline| baseline.loaded + interval);
+            // Demand can shorten the idle interval, but cannot bypass a failed
+            // attempt's retry floor (nor turn an expired baseline into a spin).
+            let due = retry_after.map_or(due, |retry: Instant| due.max(retry));
             tokio::select! {
                 _ = stop.changed() => break,
-                _ = prices.wake_refresh.notified() => {},
-                _ = tokio::time::sleep(PUBLISH_INTERVAL) => {},
+                _ = prices.wake_refresh.notified() => continue,
+                _ = wait_until_due(due) => {},
+            }
+            // Demand may have expired while this active deadline was sleeping.
+            // Recheck before starting REST rather than doing one extra active refresh.
+            if prices
+                .baseline
+                .load()
+                .as_ref()
+                .is_some_and(|baseline| baseline.loaded.elapsed() < prices.refresh_interval())
+            {
+                continue;
+            }
+            let had_baseline = prices.baseline.load().is_some();
+            tokio::select! {
+                _ = stop.changed() => break,
+                result = self.refresh_prices(market) => {
+                    match result {
+                        Err(error) => {
+                            prices.reset_idle_refresh();
+                            retry_after = Some(Instant::now() + PUBLISH_INTERVAL);
+                            tracing::warn!(?market,%error,"price snapshot refresh failed");
+                        }
+                        Ok(()) => {
+                            retry_after = None;
+                            if had_baseline && !prices.active() {
+                                prices.backoff_idle_refresh();
+                            } else {
+                                prices.reset_idle_refresh();
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -295,21 +356,62 @@ impl Tickers {
         mut stop: watch::Receiver<bool>,
     ) {
         let prices = &self.prices[market as usize];
+        let mut retry_after = None;
         while !*stop.borrow() {
-            if prices.active() {
-                tokio::select! {
-                    _ = stop.changed() => break,
-                    result = self.publish_prices(market) => {
-                        if let Err(error) = result { tracing::warn!(?market,%error,"price snapshot publication failed"); }
+            #[cfg(test)]
+            prices.publish_checks.fetch_add(1, Ordering::Relaxed);
+            let due = if prices.active() {
+                prices
+                    .baseline
+                    .load_full()
+                    .filter(|baseline| baseline.loaded.elapsed() < MAX_REST_AGE)
+                    .map(|baseline| {
+                        let due = prices
+                            .published
+                            .load()
+                            .as_ref()
+                            .filter(|published| Arc::ptr_eq(&published.baseline, &baseline))
+                            .map_or_else(Instant::now, |published| {
+                                published.rendered + PUBLISH_INTERVAL
+                            });
+                        retry_after.map_or(due, |retry: Instant| due.max(retry))
+                    })
+            } else {
+                None
+            };
+            tokio::select! {
+                _ = stop.changed() => break,
+                _ = prices.wake_publish.notified() => continue,
+                _ = async {
+                    match due {
+                        Some(due) => wait_until_due(due).await,
+                        None => std::future::pending::<()>().await,
                     }
-                }
+                } => {},
+            }
+            if !prices.active() {
+                continue;
             }
             tokio::select! {
                 _ = stop.changed() => break,
-                _ = prices.wake_publish.notified() => {},
-                _ = tokio::time::sleep(PUBLISH_INTERVAL) => {},
+                result = self.publish_prices(market) => {
+                    retry_after = if let Err(error) = result {
+                        tracing::warn!(?market,%error,"price snapshot publication failed");
+                        Some(Instant::now() + PUBLISH_INTERVAL)
+                    } else {
+                        None
+                    };
+                }
             }
         }
+    }
+}
+
+async fn wait_until_due(due: Instant) {
+    // Already-due work needs no timer registration (also avoids timer rounding
+    // delaying bootstrap when notifications arrive before the worker starts).
+    if due > Instant::now() {
+        tokio::time::sleep_until(due).await;
     }
 }
 
@@ -333,6 +435,10 @@ mod tests {
                 .unwrap();
             let tickers = Tickers::new(api.clone(), crate::metadata::Metadata::new(api, 300));
             let prices = &tickers.prices[market as usize];
+            for _ in 0..8 {
+                prices.backoff_idle_refresh();
+            }
+            assert_eq!(prices.refresh_interval(), Duration::from_secs(5));
             prices.baseline.store(Some(Arc::new(Baseline {
                 rows: vec![PriceRow::new(json!({"symbol":"HALTED","price":"0.00000001"})).unwrap()],
                 order: [("HALTED".into(), 0)].into(),
@@ -341,7 +447,7 @@ mod tests {
             tickers.publish_prices(market).await.unwrap();
             // The maintenance owner holds this mutex during both pacing and HTTP.
             let _blocked_refresh = prices.refresh.lock().await;
-            tokio::time::advance(Duration::from_secs(4)).await;
+            tokio::time::advance(Duration::from_secs(6)).await;
             // Paused Tokio time must not race the real CPU worker thread.
             tickers.publish_prices(market).await.unwrap();
             let body = tokio::time::timeout(Duration::from_millis(100), tickers.all_prices(market))
@@ -352,7 +458,9 @@ mod tests {
                 serde_json::from_slice::<Value>(&body).unwrap()[0]["price"],
                 "0.00000001"
             );
-            tokio::time::advance(Duration::from_secs(16)).await;
+            assert_eq!(prices.idle_refresh_ms.load(Ordering::Relaxed), 2_000);
+            assert_eq!(prices.refresh_interval(), REFRESH_INTERVAL);
+            tokio::time::advance(Duration::from_secs(14)).await;
             let start = Instant::now();
             for _ in 0..200 {
                 let error =
@@ -401,5 +509,230 @@ mod tests {
             "re-encoding never makes an expired baseline fresh"
         );
         assert_eq!(prices.status()["encoded_rest_age_ms"], 10_000);
+    }
+}
+
+#[cfg(test)]
+mod idle_backoff_tests {
+    use super::*;
+    #[test]
+    fn idle_refresh_backoff_is_bounded_and_demand_restores_active_cadence() {
+        let prices = Prices::new();
+        assert_eq!(prices.refresh_interval(), Duration::from_secs(2));
+        for expected in [3, 4, 5, 5] {
+            prices.backoff_idle_refresh();
+            assert_eq!(prices.refresh_interval(), Duration::from_secs(expected));
+        }
+        prices
+            .access
+            .store(crate::funding::now() as u64, Ordering::Relaxed);
+        assert_eq!(prices.refresh_interval(), REFRESH_INTERVAL);
+        assert_eq!(prices.idle_refresh_ms.load(Ordering::Relaxed), 2_000);
+    }
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+
+    async fn settle() {
+        for _ in 0..200 {
+            tokio::task::yield_now().await;
+        }
+    }
+    // Paused Tokio time and real network/CPU threads must not auto-advance each
+    // other's deadlines. Keep the executor runnable until the observation arrives.
+    async fn observe(mut ready: impl FnMut() -> bool) {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !ready() {
+            assert!(
+                std::time::Instant::now() < end,
+                "background observation timed out"
+            );
+            tokio::task::yield_now().await;
+        }
+    }
+    async fn fixture(fail: bool) -> (Arc<Tickers>, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let root = format!("http://{}", listener.local_addr().unwrap());
+        let router = axum::Router::new().route(
+            "/api/v3/ticker/price",
+            axum::routing::get(move || async move {
+                if fail {
+                    (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        axum::Json(json!({"code":-1,"msg":"test failure"})),
+                    )
+                } else {
+                    (
+                        axum::http::StatusCode::OK,
+                        axum::Json(json!([{"symbol":"TESTUSDT","price":"1"}])),
+                    )
+                }
+            }),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let api = crate::transport::RestApi::new(&root, &root, 6000).unwrap();
+        (
+            Tickers::new(api.clone(), crate::metadata::Metadata::new(api, 300)),
+            server,
+        )
+    }
+    fn seed(prices: &Prices, loaded: Instant) {
+        prices.baseline.store(Some(Arc::new(Baseline {
+            rows: vec![PriceRow::new(json!({"symbol":"TESTUSDT","price":"1"})).unwrap()],
+            order: [("TESTUSDT".into(), 0)].into(),
+            loaded,
+        })));
+    }
+
+    #[tokio::test]
+    async fn idle_refresh_sleeps_to_backoff_deadlines_and_demand_shortens_the_deadline() {
+        let (tickers, server) = fixture(false).await;
+        let prices = &tickers.prices[Market::Spot as usize];
+        let (stop, rx) = watch::channel(false);
+        let t = tickers.clone();
+        tokio::time::pause();
+        let task = tokio::spawn(async move { t.run_price_refresh(Market::Spot, rx).await });
+        observe(|| {
+            prices.baseline.load().is_some() && prices.refresh_checks.load(Ordering::Relaxed) >= 2
+        })
+        .await;
+        assert_eq!(prices.rest_loads.load(Ordering::Relaxed), 1);
+        for (index, seconds) in [2_u64, 3, 4, 5].into_iter().enumerate() {
+            let checks = prices.refresh_checks.load(Ordering::Relaxed);
+            tokio::time::advance(Duration::from_millis(seconds * 1000 - 1)).await;
+            settle().await;
+            assert_eq!(
+                prices.refresh_checks.load(Ordering::Relaxed),
+                checks,
+                "idle refresh must not poll every 100ms"
+            );
+            tokio::time::advance(Duration::from_millis(2)).await;
+            observe(|| prices.refresh_checks.load(Ordering::Relaxed) > checks).await;
+            assert_eq!(prices.rest_loads.load(Ordering::Relaxed), index as u64 + 2);
+        }
+        assert_eq!(prices.idle_refresh_ms.load(Ordering::Relaxed), 5_000);
+        let loaded = prices.rest_loads.load(Ordering::Relaxed);
+        let mut symbols = vec!["TESTUSDT".into()];
+        tickers
+            .order_price_symbols(Market::Spot, &mut symbols)
+            .await
+            .unwrap();
+        settle().await;
+        tokio::time::advance(Duration::from_millis(499)).await;
+        settle().await;
+        assert_eq!(prices.rest_loads.load(Ordering::Relaxed), loaded);
+        tokio::time::advance(Duration::from_millis(2)).await;
+        observe(|| prices.rest_loads.load(Ordering::Relaxed) == loaded + 1).await;
+        stop.send(true).unwrap();
+        observe(|| task.is_finished()).await;
+        task.await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn publisher_waits_while_idle_and_consumes_pre_wait_demand_notification() {
+        let (tickers, server) = fixture(false).await;
+        let prices = &tickers.prices[Market::Spot as usize];
+        tokio::time::pause();
+        seed(prices, Instant::now());
+        let (stop, rx) = watch::channel(false);
+        let t = tickers.clone();
+        let task = tokio::spawn(async move { t.run_price_publisher(Market::Spot, rx).await });
+        observe(|| prices.publish_checks.load(Ordering::Relaxed) == 1).await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle().await;
+        assert_eq!(prices.publish_checks.load(Ordering::Relaxed), 1);
+        // Stop/restart with demand signalled before the new owner can wait.
+        stop.send(true).unwrap();
+        observe(|| task.is_finished()).await;
+        task.await.unwrap();
+        let mut symbols = vec!["TESTUSDT".into()];
+        tickers
+            .order_price_symbols(Market::Spot, &mut symbols)
+            .await
+            .unwrap();
+        let (stop, rx) = watch::channel(false);
+        let t = tickers.clone();
+        let task = tokio::spawn(async move { t.run_price_publisher(Market::Spot, rx).await });
+        observe(|| prices.publications.load(Ordering::Relaxed) == 1).await;
+        assert!(prices.cached().is_some());
+        tokio::time::advance(PUBLISH_INTERVAL + Duration::from_millis(1)).await;
+        observe(|| prices.publications.load(Ordering::Relaxed) == 2).await;
+        // Access age uses UTC; explicitly expire demand while virtual timers run.
+        prices.access.store(
+            crate::funding::now() as u64 - ACTIVE_MS - 1,
+            Ordering::Relaxed,
+        );
+        tokio::time::advance(PUBLISH_INTERVAL + Duration::from_millis(1)).await;
+        settle().await;
+        assert_eq!(prices.publications.load(Ordering::Relaxed), 2);
+        let checks = prices.publish_checks.load(Ordering::Relaxed);
+        tokio::time::advance(Duration::from_secs(10)).await;
+        settle().await;
+        assert_eq!(prices.publish_checks.load(Ordering::Relaxed), checks);
+        assert!(
+            prices.cached().is_none(),
+            "hard REST/render expiry still applies while sleeping"
+        );
+        // Expired data plus demand must not create an immediate-deadline loop.
+        prices
+            .access
+            .store(crate::funding::now() as u64, Ordering::Relaxed);
+        prices.wake_publish.notify_one();
+        settle().await;
+        let checks = prices.publish_checks.load(Ordering::Relaxed);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        settle().await;
+        assert_eq!(prices.publish_checks.load(Ordering::Relaxed), checks);
+        stop.send(true).unwrap();
+        observe(|| task.is_finished()).await;
+        task.await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn demand_notifications_cannot_bypass_failed_refresh_retry_floor() {
+        let (tickers, server) = fixture(true).await;
+        let prices = &tickers.prices[Market::Spot as usize];
+        tokio::time::pause();
+        seed(prices, Instant::now() - Duration::from_secs(20));
+        let (stop, rx) = watch::channel(false);
+        let t = tickers.clone();
+        let task = tokio::spawn(async move { t.run_price_refresh(Market::Spot, rx).await });
+        observe(|| prices.refresh_checks.load(Ordering::Relaxed) >= 2).await;
+        assert_eq!(prices.rest_loads.load(Ordering::Relaxed), 1);
+        for _ in 0..20 {
+            prices.wake_refresh.notify_one();
+            settle().await;
+        }
+        assert_eq!(prices.rest_loads.load(Ordering::Relaxed), 1);
+        tokio::time::advance(Duration::from_millis(99)).await;
+        settle().await;
+        assert_eq!(prices.rest_loads.load(Ordering::Relaxed), 1);
+        tokio::time::advance(Duration::from_millis(2)).await;
+        observe(|| prices.rest_loads.load(Ordering::Relaxed) == 2).await;
+        stop.send(true).unwrap();
+        observe(|| task.is_finished()).await;
+        task.await.unwrap();
+        server.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_cancels_a_refresh_waiting_for_the_maintenance_lock() {
+        let api =
+            crate::transport::RestApi::new("http://127.0.0.1", "http://127.0.0.1", 6000).unwrap();
+        let tickers = Tickers::new(api.clone(), crate::metadata::Metadata::new(api, 300));
+        let prices = &tickers.prices[Market::Spot as usize];
+        let _blocked = prices.refresh.lock().await;
+        let (stop, rx) = watch::channel(false);
+        let t = tickers.clone();
+        let task = tokio::spawn(async move { t.run_price_refresh(Market::Spot, rx).await });
+        settle().await;
+        assert_eq!(prices.rest_loads.load(Ordering::Relaxed), 0);
+        stop.send(true).unwrap();
+        observe(|| task.is_finished()).await;
+        task.await.unwrap();
     }
 }

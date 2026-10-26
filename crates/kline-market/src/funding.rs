@@ -24,7 +24,7 @@ const MAX_CHUNK_WINDOW: i128 = 1000;
 pub fn now() -> i64 {
     SystemClock { offset_ms: 0 }.now_ms()
 }
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Rate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -35,6 +35,8 @@ pub struct Rate {
     pub funding_rate: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mark_price: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_type: Option<String>,
 }
 pub type Chunk = BTreeMap<String, Vec<Rate>>;
 #[derive(Clone, Default, Deserialize, Debug, Hash, PartialEq, Eq)]
@@ -58,7 +60,6 @@ impl kline_service::http_compat::JsonBody for Query {
 }
 #[derive(Clone, Hash, PartialEq, Eq)]
 struct Recent {
-    symbols: Vec<String>,
     limit: usize,
     boundary: i64,
     revision: u64,
@@ -135,18 +136,41 @@ impl Funding {
         }
         Ok(rates)
     }
+    async fn load_chunk(&self, start: i64) -> Result<Chunk> {
+        let wait = start
+            .saturating_add(self.config.publication_grace_ms as i64)
+            .saturating_sub(now());
+        if wait > 0 && wait <= self.config.publication_grace_ms as i64 {
+            tokio::time::sleep(Duration::from_millis(wait as u64)).await;
+        }
+        let end = start.wrapping_add(H);
+        let rows = self.raw(None, Some(start), Some(end), Some(1000)).await?;
+        if rows.len() >= 1000 {
+            tracing::warn!(
+                start,
+                "funding hour reached 1000 rows; upstream may have truncated it"
+            );
+        }
+        let mut chunk: Chunk = BTreeMap::new();
+        for r in rows {
+            if let (Some(t), Some(s)) = (r.funding_time, r.symbol.as_ref())
+                && t >= start
+                && t < end
+                && !kline_service::http_compat::is_blank(s)
+            {
+                chunk.entry(s.clone()).or_default().push(r);
+            }
+        }
+        for rows in chunk.values_mut() {
+            rows.sort_by_key(|r| r.funding_time);
+        }
+        Ok(chunk)
+    }
     pub async fn chunk(&self, start: i64) -> Result<Arc<Chunk>> {
-        self.chunks.try_get_with(start,async{
-            let wait=start.saturating_add(self.config.publication_grace_ms as i64).saturating_sub(now());
-            if wait>0 && wait<=self.config.publication_grace_ms as i64{tokio::time::sleep(Duration::from_millis(wait as u64)).await;}
-            let end=start.wrapping_add(H);
-            let rows=self.raw(None,Some(start),Some(end),Some(1000)).await?;
-            if rows.len()>=1000{tracing::warn!(start,"funding hour reached 1000 rows; upstream may have truncated it");}
-            let mut chunk:Chunk=BTreeMap::new();for r in rows{if let (Some(t),Some(s))=(r.funding_time,r.symbol.as_ref()) && t>=start&&t<end&&!kline_service::http_compat::is_blank(s){chunk.entry(s.clone()).or_default().push(r);}}
-            for rows in chunk.values_mut(){rows.sort_by_key(|r|r.funding_time);}
-            if chunk.is_empty(){for cadence in [4,8]{if self.chunks.get(&start.wrapping_sub(cadence*H)).await.is_some_and(|c|!c.is_empty())&&self.chunks.get(&start.wrapping_sub(2*cadence*H)).await.is_some_and(|c|!c.is_empty()){tracing::warn!(start,cadence,"funding settlement snapshot is unexpectedly empty; retained until :05 retry");break;}}}
-            Ok::<_,ApiError>(Arc::new(chunk))
-        }).await.map_err(|e|(*e).clone())
+        self.chunks
+            .try_get_with(start, async { self.load_chunk(start).await.map(Arc::new) })
+            .await
+            .map_err(|e| (*e).clone())
     }
     pub async fn bulk(&self, q: Query) -> Result<Bytes> {
         let symbols: Vec<String> = q
@@ -186,22 +210,15 @@ impl Funding {
             let request_now = now();
             let boundary = request_now.div_euclid(H) * H;
             let key = Recent {
-                symbols: symbols.clone(),
                 limit,
                 boundary,
                 revision: self.revision.load(Ordering::Acquire),
             };
-            let all = symbols.is_empty();
             let load = async {
-                if all {
-                    self.encode(self.window(&[], now() - 8 * H, now(), limit).await?)
-                        .await
-                } else {
-                    self.encode(self.per_symbol(symbols, None, None, limit).await?)
-                        .await
-                }
+                self.encode(self.window(&[], now() - 8 * H, now(), limit).await?)
+                    .await
             };
-            if all && request_now - boundary < (self.config.publication_grace_ms as i64) {
+            if request_now - boundary < (self.config.publication_grace_ms as i64) {
                 return load.await;
             }
             return self
@@ -251,22 +268,30 @@ impl Funding {
         }
         // Stream chunks into newest-N buckets: memory is bounded independently of the range.
         let mut out: Chunk = symbols.iter().map(|s| (s.clone(), Vec::new())).collect();
-        let wanted: BTreeSet<_> = symbols.iter().collect();
+        let append = |bucket: &mut Vec<Rate>, rows: &[Rate]| {
+            bucket.extend(
+                rows.iter()
+                    .filter(|r| r.funding_time.is_some_and(|v| v >= start && v < end))
+                    .cloned(),
+            );
+            if bucket.len() > limit {
+                bucket.drain(..bucket.len() - limit);
+            }
+        };
         let mut t = first;
         while t <= last && t <= current {
             let chunk = self.chunk(t).await?;
-            for (s, rows) in chunk.iter() {
-                if !wanted.is_empty() && !wanted.contains(s) {
-                    continue;
+            if symbols.is_empty() {
+                for (symbol, rows) in chunk.iter() {
+                    append(out.entry(symbol.clone()).or_default(), rows);
                 }
-                let bucket = out.entry(s.clone()).or_default();
-                bucket.extend(
-                    rows.iter()
-                        .filter(|r| r.funding_time.is_some_and(|v| v >= start && v < end))
-                        .cloned(),
-                );
-                if bucket.len() > limit {
-                    bucket.drain(..bucket.len() - limit);
+            } else {
+                // Requested buckets are preseeded, including symbols with no
+                // records. Look them up directly instead of scanning the market.
+                for (symbol, bucket) in &mut out {
+                    if let Some(rows) = chunk.get(symbol) {
+                        append(bucket, rows);
+                    }
                 }
             }
             let Some(next) = t.checked_add(H) else { break };
@@ -303,26 +328,63 @@ impl Funding {
         }).buffer_unordered(4).try_collect().await?;
         Ok(rows.into_iter().collect())
     }
+    /// Refresh publication data, invalidating recent caches only when it changes.
     pub async fn retry_boundary(&self, boundary: i64) -> Result<()> {
-        self.chunks.invalidate(&boundary).await;
-        self.revision.fetch_add(1, Ordering::Release);
-        self.bulk(Query::default()).await?;
+        self.refresh_boundary(boundary, false).await
+    }
+    /// The existing :05 refresh also renews independent per-symbol recent caches.
+    pub async fn force_retry_boundary(&self, boundary: i64) -> Result<()> {
+        self.refresh_boundary(boundary, true).await
+    }
+    async fn refresh_boundary(&self, boundary: i64, force_recent: bool) -> Result<()> {
+        // Fetch before replacing: readers keep the last good snapshot while the
+        // background retry is slow or fails. A nonempty snapshot may still be
+        // partial, so every scheduled retry runs even after the first rows arrive.
+        let changed = if let Some(previous) = self.chunks.get(&boundary).await {
+            let mut fresh = self.load_chunk(boundary).await?;
+            // Publication is incremental. Retain already observed records if a
+            // later successful response is empty/partial; newer values for the
+            // same symbol, timestamp and rate type replace earlier ones.
+            for (symbol, rows) in previous.iter() {
+                let bucket = fresh.entry(symbol.clone()).or_default();
+                for row in rows {
+                    if !bucket.iter().any(|new| {
+                        new.funding_time == row.funding_time && new.rate_type == row.rate_type
+                    }) {
+                        bucket.push(row.clone());
+                    }
+                }
+                bucket.sort_by_key(|row| row.funding_time);
+            }
+            let changed = previous.as_ref() != &fresh;
+            if changed {
+                self.chunks.insert(boundary, Arc::new(fresh)).await;
+            }
+            changed
+        } else {
+            // Join an in-flight cold load rather than racing it with a second
+            // request that could publish in the opposite order.
+            self.chunk(boundary).await?;
+            true
+        };
+        if changed || force_recent {
+            self.revision.fetch_add(1, Ordering::Release);
+        }
         Ok(())
     }
     pub async fn run(self: Arc<Self>, mut stop: tokio::sync::watch::Receiver<bool>) {
-        // Warm once at startup, then sleep directly to UTC :00+grace and :05.
-        // No polling and no redundant :05 invalidation when starting late in an hour.
         let mut current = now();
         let mut boundary = current.div_euclid(H) * H;
         let mut warmed = false;
         let mut retried = current - boundary >= 5 * 60_000;
         loop {
             let warm_at = boundary + self.config.publication_grace_ms as i64 + 1;
-            let retry_at = boundary + 5 * 60_000;
+            let final_retry_at = boundary + 5 * 60_000;
             let due = if !warmed {
                 warm_at.max(current)
             } else if !retried {
-                retry_at
+                next_publication_retry(boundary, self.config.publication_grace_ms, current)
+                    .unwrap_or(final_retry_at)
             } else {
                 boundary + H + self.config.publication_grace_ms as i64 + 1
             };
@@ -336,14 +398,49 @@ impl Funding {
             }
             let retry = warmed && !retried;
             let work = async {
-                if retry {
+                if retry && current >= final_retry_at {
+                    self.force_retry_boundary(boundary).await
+                } else if retry {
                     self.retry_boundary(boundary).await
                 } else {
                     self.bulk(Query::default()).await.map(|_| ())
                 }
             };
             tokio::select! {_=stop.changed()=>break,result=work=>if let Err(e)=result{tracing::warn!(error=%e,retry,"funding scheduled warm failed")}}
-            if retry { retried = true } else { warmed = true }
+            if retry && current >= final_retry_at {
+                retried = true;
+                if self
+                    .chunks
+                    .get(&boundary)
+                    .await
+                    .is_some_and(|chunk| chunk.is_empty())
+                {
+                    for cadence in [4, 8] {
+                        if self
+                            .chunks
+                            .get(&(boundary - cadence * H))
+                            .await
+                            .is_some_and(|c| !c.is_empty())
+                            && self
+                                .chunks
+                                .get(&(boundary - 2 * cadence * H))
+                                .await
+                                .is_some_and(|c| !c.is_empty())
+                        {
+                            tracing::warn!(
+                                boundary,
+                                cadence,
+                                "funding settlement snapshot remains unexpectedly empty after publication retries"
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
+            warmed = true;
+            // Skip missed checkpoints instead of issuing catch-up bursts after a
+            // slow upstream call. The next hour always starts a fresh schedule.
+            current = now();
         }
     }
 }
@@ -351,4 +448,47 @@ fn encode(funding: Chunk) -> Result<Bytes> {
     serde_json::to_vec(&serde_json::json!({"ts_ms":now(),"fundingRates":funding}))
         .map(Bytes::from)
         .map_err(ApiError::internal)
+}
+
+// Seven background attempts at most, relative to the configured publication
+// grace. Keep the existing absolute :05 refresh; attempts beyond it are skipped.
+fn next_publication_retry(boundary: i64, grace_ms: u64, after: i64) -> Option<i64> {
+    [1_000, 2_000, 5_000, 10_000, 30_000, 60_000, 120_000]
+        .into_iter()
+        .map(|delay| {
+            boundary
+                .saturating_add(grace_ms as i64)
+                .saturating_add(delay)
+        })
+        .find(|&due| due > after && due < boundary.saturating_add(300_000))
+}
+
+#[cfg(test)]
+mod publication_retry_tests {
+    use super::*;
+
+    #[test]
+    fn publication_retries_are_bounded_and_respect_grace_and_missed_checkpoints() {
+        let boundary = 10 * H;
+        let mut after = boundary;
+        let mut due = Vec::new();
+        while let Some(next) = next_publication_retry(boundary, 0, after) {
+            due.push(next - boundary);
+            after = next;
+        }
+        assert_eq!(due, [1_000, 2_000, 5_000, 10_000, 30_000, 60_000, 120_000]);
+        assert_eq!(
+            next_publication_retry(boundary, 500, boundary + 500),
+            Some(boundary + 1_500)
+        );
+        assert_eq!(
+            next_publication_retry(boundary, 0, boundary + 65_000),
+            Some(boundary + 120_000)
+        );
+        assert_eq!(next_publication_retry(boundary, 300_000, boundary), None);
+        assert_eq!(
+            next_publication_retry(boundary, 0, boundary + 300_000),
+            None
+        );
+    }
 }

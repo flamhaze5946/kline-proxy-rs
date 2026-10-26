@@ -626,6 +626,35 @@ pub async fn sync_clock(
     }
 }
 
+// A dump checks the current clock before each series, but its interval set only
+// changes with the catalog. Rebuild on generation changes, including mid-dump.
+#[derive(Default)]
+struct PersistenceGuard {
+    generation: Option<u64>,
+    intervals: Vec<kline_core::Interval>,
+}
+impl PersistenceGuard {
+    fn guarded(&mut self, engine: &Engine, before: u64, after: u64) -> bool {
+        let slots = engine.catalog.slots();
+        if self.generation != Some(slots.generation) {
+            let mut present = [false; 16];
+            for slot in slots.iter() {
+                present[slot.interval.index()] = true;
+            }
+            self.intervals = kline_core::Interval::all()
+                .filter(|interval| present[interval.index()])
+                .collect();
+            self.generation = Some(slots.generation);
+        }
+        guarded(
+            engine.now_ms(),
+            self.intervals.iter().copied(),
+            before,
+            after,
+        )
+    }
+}
+
 pub async fn persist(
     mut store: Store,
     engine: Arc<Engine>,
@@ -645,14 +674,10 @@ pub async fn persist(
         let e = engine.clone();
         let c = config.clone();
         match tokio::task::spawn_blocking(move || {
+            let mut guard = PersistenceGuard::default();
             let report = store.dump(&e, || {
                 final_dump
-                    || !guarded(
-                        e.now_ms(),
-                        e.catalog.slots().iter().map(|s| s.interval),
-                        c.boundary_guard_before_ms,
-                        c.boundary_guard_after_ms,
-                    )
+                    || !guard.guarded(&e, c.boundary_guard_before_ms, c.boundary_guard_after_ms)
             });
             let dirty = store.is_dirty(&e);
             (store, report, dirty)
@@ -685,5 +710,54 @@ pub async fn persist(
         if final_dump {
             break;
         }
+    }
+}
+
+#[cfg(test)]
+mod persistence_guard_tests {
+    use super::*;
+    use kline_core::{Interval, Market};
+    use kline_service::{Catalog, Instrument, Settings};
+    use std::num::NonZeroUsize;
+
+    struct TestClock(AtomicI64);
+    impl Clock for TestClock {
+        fn now_ms(&self) -> i64 {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+    fn instrument(symbol: String, interval: &str) -> Instrument {
+        Instrument {
+            market: Market::Spot,
+            symbol,
+            interval: Interval::parse(interval).unwrap(),
+            trading: true,
+            continuous: None,
+            capacity: NonZeroUsize::new(2).unwrap(),
+        }
+    }
+    #[test]
+    fn persistence_guard_deduplicates_but_rechecks_time_and_catalog_changes() {
+        let mut instruments: Vec<_> = (0..2524)
+            .map(|id| instrument(format!("S{id}"), if id % 2 == 0 { "1h" } else { "1d" }))
+            .collect();
+        let clock = Arc::new(TestClock(AtomicI64::new(60_500)));
+        let engine = Engine::new(
+            Catalog::new(instruments.clone()).unwrap(),
+            clock.clone(),
+            Settings::default(),
+        );
+        let mut guard = PersistenceGuard::default();
+        assert!(!guard.guarded(&engine, 1000, 1000));
+        assert_eq!(guard.intervals.len(), 2);
+        // Simulate a directory update between two per-series dump checks.
+        instruments.push(instrument("NEW".into(), "1m"));
+        engine.refresh_catalog(instruments).unwrap();
+        assert!(guard.guarded(&engine, 1000, 1000));
+        assert_eq!(guard.intervals.len(), 3);
+        clock.0.store(61_001, Ordering::Relaxed);
+        assert!(!guard.guarded(&engine, 1000, 1000));
+        clock.0.store(119_500, Ordering::Relaxed);
+        assert!(guard.guarded(&engine, 1000, 1000));
     }
 }

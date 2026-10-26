@@ -119,6 +119,7 @@ pub async fn run_controlled(
             // interval; only the two sends themselves (at most 2 s) hold the loop.
             let mut pending: Vec<String> = Vec::new();
             let mut next_resubscribe = tokio::time::Instant::now();
+            let mut inbound_deadline = connected + Duration::from_secs(180);
             loop {
                 let next = tokio::select! {
                     _ = shutdown.changed() => { let _ = tokio::time::timeout(Duration::from_secs(1),socket.close(None)).await; break; },
@@ -145,26 +146,26 @@ pub async fn run_controlled(
                         next_resubscribe = tokio::time::Instant::now() + RESUBSCRIBE_INTERVAL;
                         continue;
                     },
-                    next = tokio::time::timeout(Duration::from_secs(180), socket.next()) => next,
+                    _ = tokio::time::sleep_until(inbound_deadline) => break,
+                    next = socket.next() => next,
                 };
+                inbound_deadline = tokio::time::Instant::now() + Duration::from_secs(180);
                 status.last_io_ms.store(engine.now_ms(), Ordering::Relaxed);
                 match next {
-                    Ok(Some(Ok(Message::Text(text)))) => {
-                        match engine.ingest(market, text.as_bytes()) {
-                            Ok(Some(_)) if !mapped => {
-                                status.mapped_epoch.store(epoch, Ordering::Release);
-                                mapped = true;
-                            }
-                            Err(error) => tracing::warn!(%error,"invalid upstream frame"),
-                            _ => {}
+                    Some(Ok(Message::Text(text))) => match engine.ingest(market, text.as_bytes()) {
+                        Ok(Some(_)) if !mapped => {
+                            status.mapped_epoch.store(epoch, Ordering::Release);
+                            mapped = true;
                         }
-                    }
-                    Ok(Some(Ok(Message::Ping(_)))) => {
+                        Err(error) => tracing::warn!(%error,"invalid upstream frame"),
+                        _ => {}
+                    },
+                    Some(Ok(Message::Ping(_))) => {
                         if socket.flush().await.is_err() {
                             break;
                         }
                     }
-                    Ok(Some(Ok(Message::Pong(_)))) => {}
+                    Some(Ok(Message::Pong(_))) => {}
                     _ => break,
                 }
                 count += 1;

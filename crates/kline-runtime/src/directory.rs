@@ -172,7 +172,43 @@ struct Running {
     stop: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
     commands: tokio::sync::mpsc::Sender<Vec<String>>,
-    resubscribed: BTreeMap<usize, i64>,
+    resubscribed: TopicRetries,
+}
+#[derive(Default)]
+struct TopicRetries {
+    epoch: u64,
+    topics: BTreeMap<usize, TopicRetry>,
+}
+impl TopicRetries {
+    fn observe_epoch(&mut self, epoch: u64) {
+        if epoch != self.epoch {
+            self.topics.clear();
+            self.epoch = epoch;
+        }
+    }
+}
+// A silent topic can simply have no trades. Keep the initial detection deadline,
+// then back off unsuccessful repairs instead of sending the same subscription forever
+// at the initial cadence. A real frame resets the backoff; REST updates do not.
+#[derive(Default)]
+struct TopicRetry {
+    last_attempt_ms: i64,
+    attempts: u32,
+}
+impl TopicRetry {
+    fn due(&mut self, now: i64, last_frame: i64, connected: i64, stale_ms: i64) -> bool {
+        if last_frame > self.last_attempt_ms {
+            *self = Self::default();
+        }
+        let delay = stale_ms
+            .saturating_mul(1_i64 << self.attempts.min(10))
+            .min(stale_ms.max(15 * 60_000));
+        now.saturating_sub(last_frame.max(connected).max(self.last_attempt_ms)) > delay
+    }
+    fn sent(&mut self, now: i64) {
+        self.last_attempt_ms = now;
+        self.attempts = self.attempts.saturating_add(1);
+    }
 }
 pub async fn supervise(
     engine: Arc<Engine>,
@@ -239,16 +275,18 @@ pub async fn supervise(
                     stop: tx,
                     task,
                     commands,
-                    resubscribed: BTreeMap::new(),
+                    resubscribed: TopicRetries::default(),
                 },
             );
         }
-        // A quiet symbol is not a dead connection. Resubscribe only its topic and
-        // request REST reconciliation; preserve every healthy stream epoch.
+        // Repair individual silent topics without changing healthy stream epochs.
+        // Scheduled REST reconciliation and readiness checks remain independent.
         for (key, r) in &mut running {
             if !r.status.connected.load(Ordering::Acquire) {
                 continue;
             }
+            let epoch = r.status.epoch.load(Ordering::Acquire);
+            r.resubscribed.observe_epoch(epoch);
             let started = r.status.connected_since_ms.load(Ordering::Relaxed);
             let stale: Vec<_> = r
                 .spec
@@ -259,10 +297,13 @@ pub async fn supervise(
                         .catalog
                         .slot(*id)
                         .last_stream_ms
-                        .load(Ordering::Relaxed)
-                        .max(started)
-                        .max(r.resubscribed.get(id).copied().unwrap_or(0));
-                    now - last > config.websocket.topic_stale_seconds as i64 * 1000
+                        .load(Ordering::Relaxed);
+                    r.resubscribed.topics.entry(*id).or_default().due(
+                        now,
+                        last,
+                        started,
+                        config.websocket.topic_stale_seconds as i64 * 1000,
+                    )
                 })
                 .cloned()
                 .collect();
@@ -272,7 +313,7 @@ pub async fn supervise(
                     .is_ok()
             {
                 for (_, id) in &stale {
-                    r.resubscribed.insert(*id, now);
+                    r.resubscribed.topics.entry(*id).or_default().sent(now);
                 }
                 tracing::info!(
                     key,
@@ -334,5 +375,98 @@ pub async fn refresh(
             Ok::<_, anyhow::Error>(())
         };
         tokio::select! {_=stop.changed()=>break,result=update=>if let Err(e)=result{tracing::warn!(error=%e,"directory refresh failed; keeping last valid directory")}}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TopicRetries, TopicRetry};
+
+    #[test]
+    fn silent_topic_retries_back_off_but_remain_bounded() {
+        let mut retry = TopicRetry::default();
+        let connected = 1_000_000;
+        let stale = 120_000;
+        assert!(!retry.due(connected + stale, 0, connected, stale));
+        let mut attempts = Vec::new();
+        for elapsed in (0..=3_600_000).step_by(1000) {
+            let now = connected + elapsed;
+            if retry.due(now, 0, connected, stale) {
+                attempts.push(now);
+                retry.sent(now);
+            }
+        }
+        // Fixed 120 s retries used to send 29 times in an hour. Recovery still
+        // starts at the original deadline, and silent topics are retried forever.
+        assert_eq!(attempts.len(), 6);
+        assert_eq!(attempts[0] - connected, 121_000);
+        assert_eq!(attempts[1] - attempts[0], 241_000);
+        assert_eq!(attempts[2] - attempts[1], 481_000);
+        assert_eq!(attempts[5] - attempts[4], 901_000);
+    }
+
+    #[test]
+    fn real_frame_restores_initial_fault_detection_deadline() {
+        let mut retry = TopicRetry::default();
+        let stale = 120_000;
+        for now in [121_000, 362_000, 843_000, 1_744_000] {
+            retry.sent(now);
+        }
+        // A stale/duplicate observation must not erase the accumulated backoff.
+        assert!(!retry.due(1_865_000, 1_000, 0, stale));
+        let recovered = 1_900_000;
+        assert!(!retry.due(recovered + stale, recovered, 0, stale));
+        assert!(retry.due(recovered + stale + 1, recovered, 0, stale));
+    }
+
+    #[test]
+    fn failed_command_enqueue_does_not_postpone_recovery() {
+        let mut retry = TopicRetry::default();
+        assert!(retry.due(121_000, 0, 0, 120_000));
+        // Only a successful enqueue calls sent().
+        assert!(retry.due(122_000, 0, 0, 120_000));
+        retry.sent(122_000);
+        assert!(!retry.due(123_000, 0, 0, 120_000));
+    }
+
+    #[test]
+    fn configured_long_timeout_is_never_shortened_by_the_cap() {
+        let mut retry = TopicRetry::default();
+        retry.sent(1000);
+        assert!(!retry.due(3_601_000, 0, 0, 3_600_000));
+        assert!(retry.due(3_601_001, 0, 0, 3_600_000));
+    }
+    #[test]
+    fn reconnect_resets_retry_backoff_and_waits_for_new_connection_grace() {
+        let mut retries = TopicRetries::default();
+        retries.observe_epoch(1);
+        let retry = retries.topics.entry(10).or_default();
+        for now in [121_000, 362_000, 843_000] {
+            retry.sent(now);
+        }
+        retries.observe_epoch(1);
+        assert_eq!(retries.topics[&10].attempts, 3);
+        retries.observe_epoch(3);
+        let retry = retries.topics.entry(10).or_default();
+        let connected = 900_000;
+        assert!(!retry.due(connected + 120_000, 1000, connected, 120_000));
+        assert!(retry.due(connected + 120_001, 1000, connected, 120_000));
+    }
+
+    #[test]
+    fn invalid_stale_thresholds_are_rejected_before_supervision() {
+        for seconds in [0, 29, 86_401] {
+            let config: crate::config::Config = serde_json::from_value(serde_json::json!({
+                "listen":"127.0.0.1:0", "websocket":{"topic_stale_seconds":seconds}
+            }))
+            .unwrap();
+            assert!(config.catalog().is_err());
+        }
+        let mut retry = TopicRetry::default();
+        assert!(!retry.due(30_000, 0, 0, 30_000));
+        assert!(retry.due(30_001, 0, 0, 30_000));
+        retry.sent(30_001);
+        assert!(!retry.due(90_001, 0, 0, 30_000));
+        assert!(retry.due(90_002, 0, 0, 30_000));
     }
 }

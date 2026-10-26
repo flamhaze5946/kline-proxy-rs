@@ -138,6 +138,14 @@ impl Series {
             self.entries.reserve_exact(target - self.entries.len());
         }
     }
+    /// Borrow retained records for compact summaries without cloning every OHLCV.
+    pub fn iter_records(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = (&Bar, bool)> + ExactSizeIterator {
+        self.entries
+            .iter()
+            .map(|entry| (&entry.bar, entry.final_bar))
+    }
     pub fn records(&self) -> Vec<(Bar, bool)> {
         self.entries
             .iter()

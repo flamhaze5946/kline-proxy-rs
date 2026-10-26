@@ -349,3 +349,100 @@ async fn the_engine_records_connection_attempts_in_its_journal() {
     assert_eq!(recorded.len(), 1);
     std::fs::remove_file(path).unwrap();
 }
+
+// Keep the executor runnable while paused: network readiness must be drained before
+// deliberately advancing the idle deadline (rather than relying on auto-advance).
+async fn pump_io() {
+    for _ in 0..1000 {
+        tokio::task::yield_now().await;
+    }
+}
+
+async fn idle_deadline_case(send_frame: bool) {
+    use kline_service::upstream::{StreamStatus, run_controlled};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let e = engine();
+    let status = Arc::new(StreamStatus::default());
+    let received = Arc::new(AtomicUsize::new(0));
+    let server_received = received.clone();
+    let (frame_tx, mut frame_rx) = tokio::sync::mpsc::channel::<()>(1);
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_async(stream).await.unwrap();
+        loop {
+            tokio::select! {
+                Some(()) = frame_rx.recv() => {
+                    let frame = r#"{"e":"kline","s":"BTCUSDT","E":1,"k":{"t":0,"T":3599999,"i":"1h","o":"1","h":"1","l":"1","c":"1","v":"1","q":"1","V":"1","Q":"1","n":1,"x":true}}"#;
+                    if socket.send(Message::Text(frame.into())).await.is_err() { break; }
+                }
+                message = socket.next() => match message {
+                    Some(Ok(Message::Text(_))) => { server_received.fetch_add(1, Ordering::Relaxed); }
+                    _ => break,
+                }
+            }
+        }
+    });
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let (commands, receiver) = tokio::sync::mpsc::channel(2);
+    let task = tokio::spawn(run_controlled(
+        e.clone(),
+        Market::Spot,
+        url,
+        stop_rx,
+        status.clone(),
+        Some(receiver),
+    ));
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !status.connected.load(Ordering::Acquire) {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .unwrap();
+    tokio::time::pause();
+    for _ in 0..5 {
+        tokio::time::advance(Duration::from_secs(30)).await;
+        commands.try_send(vec!["btcusdt@kline_1h".into()]).unwrap();
+        pump_io().await;
+    }
+    assert_eq!(received.load(Ordering::Relaxed), 10);
+    if send_frame {
+        frame_tx.try_send(()).unwrap();
+        pump_io().await;
+        assert!(e.catalog.slot(0).get(0).is_some());
+    }
+    tokio::time::advance(Duration::from_secs(31)).await;
+    pump_io().await;
+    if send_frame {
+        assert!(
+            status.connected.load(Ordering::Acquire),
+            "a real frame renews the idle deadline"
+        );
+        assert_eq!(status.epoch.load(Ordering::Acquire), 1);
+        tokio::time::advance(Duration::from_secs(150)).await;
+        pump_io().await;
+    }
+    assert!(
+        status.epoch.load(Ordering::Acquire) >= 2,
+        "silent input must disconnect despite outbound commands"
+    );
+    tokio::time::resume();
+    stop_tx.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(3), task)
+        .await
+        .unwrap()
+        .unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn outbound_subscription_commands_do_not_renew_inbound_idle_deadline() {
+    idle_deadline_case(false).await;
+}
+
+#[tokio::test]
+async fn inbound_frames_renew_the_idle_deadline() {
+    idle_deadline_case(true).await;
+}

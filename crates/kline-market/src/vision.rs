@@ -147,6 +147,7 @@ pub fn parse_archive(bytes: &[u8], symbol: &str, start: i64, end: i64) -> Result
                 funding_time: Some(time),
                 funding_rate: Some(rate),
                 mark_price: None,
+                rate_type: None,
             });
         }
     }

@@ -168,7 +168,7 @@ dependencies = [
 
 [[package]]
 name = "binance-wire"
-version = "0.4.22"
+version = "0.4.24"
 dependencies = [
  "arrayvec",
  "kline-core",
@@ -887,7 +887,7 @@ dependencies = [
 
 [[package]]
 name = "kline-core"
-version = "0.4.22"
+version = "0.4.24"
 dependencies = [
  "bigdecimal",
  "chrono",
@@ -897,7 +897,7 @@ dependencies = [
 
 [[package]]
 name = "kline-market"
-version = "0.4.22"
+version = "0.4.24"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -929,7 +929,7 @@ dependencies = [
 
 [[package]]
 name = "kline-runtime"
-version = "0.4.22"
+version = "0.4.24"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -957,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "kline-service"
-version = "0.4.22"
+version = "0.4.24"
 dependencies = [
  "anyhow",
  "arc-swap",

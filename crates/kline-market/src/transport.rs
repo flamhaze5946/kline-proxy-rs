@@ -102,8 +102,17 @@ impl RestApi {
             let pacing = self.pace[lane]
                 .acquire(if lane == 2 { 1 } else { weight }, priority)
                 .await;
-            if detailed || pacing.elapsed >= Duration::from_secs(1) {
+            if pacing.elapsed >= Duration::from_secs(1) {
                 tracing::info!(
+                    attempt,
+                    lane,
+                    queue_ms = pacing.elapsed.as_secs_f64() * 1000.,
+                    wait_rounds = pacing.rounds,
+                    cooldown_rounds = pacing.cooldown_rounds,
+                    "REST pacing acquired"
+                );
+            } else if detailed {
+                tracing::debug!(
                     attempt,
                     lane,
                     queue_ms = pacing.elapsed.as_secs_f64() * 1000.,
@@ -119,8 +128,15 @@ impl RestApi {
             let started = Instant::now();
             let response = self.client.get(url.clone()).query(query).send().await;
             let headers_ms = started.elapsed().as_secs_f64() * 1000.;
-            if detailed || headers_ms >= 1000. {
+            if headers_ms >= 1000. || !response.as_ref().is_ok_and(|r| r.status().is_success()) {
                 tracing::info!(
+                    attempt,
+                    headers_ms,
+                    status = response.as_ref().map(|r| r.status().as_u16()).unwrap_or(0),
+                    "REST headers received"
+                );
+            } else if detailed {
+                tracing::debug!(
                     attempt,
                     headers_ms,
                     status = response.as_ref().map(|r| r.status().as_u16()).unwrap_or(0),
@@ -176,8 +192,17 @@ impl RestApi {
                 anyhow::ensure!(bytes.len() + chunk.len() <= max, "REST response too large");
                 bytes.extend_from_slice(&chunk);
             }
-            if detailed || started.elapsed() >= Duration::from_secs(1) {
+            if started.elapsed() >= Duration::from_secs(1) || !status.is_success() {
                 tracing::info!(
+                    attempt,
+                    status = status.as_u16(),
+                    http_ms = started.elapsed().as_secs_f64() * 1000.,
+                    queue_ms = pacing.elapsed.as_secs_f64() * 1000.,
+                    bytes = bytes.len(),
+                    "REST body received"
+                );
+            } else if detailed {
+                tracing::debug!(
                     attempt,
                     status = status.as_u16(),
                     http_ms = started.elapsed().as_secs_f64() * 1000.,

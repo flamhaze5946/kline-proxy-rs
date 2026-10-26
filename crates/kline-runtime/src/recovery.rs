@@ -19,6 +19,42 @@ enum TailGoal {
     Final,
     Fresh,
 }
+// Recovery only needs history timing/finality and the previous close. Preserve
+// these across REST awaits, including exact-mode values, without copying OHLCV.
+struct RecoveryRecord {
+    open_time: i64,
+    close_time: i64,
+    closed: bool,
+    close: f64,
+    number_type: kline_core::NumberType,
+    exact: Option<Arc<kline_core::ExactNumbers>>,
+}
+impl RecoveryRecord {
+    fn new(bar: &Bar, closed: bool) -> Self {
+        Self {
+            open_time: bar.open_time,
+            close_time: bar.close_time,
+            closed,
+            close: bar.values[3],
+            number_type: bar.number_type,
+            exact: bar.exact.clone(),
+        }
+    }
+    // Only consumed by synthetic_after, which copies the close and zeros volume.
+    fn synthetic_anchor(&self) -> Bar {
+        Bar {
+            open_time: self.open_time,
+            close_time: self.close_time,
+            values: [
+                self.close, self.close, self.close, self.close, 0., 0., 0., 0.,
+            ],
+            number_type: self.number_type,
+            exact: self.exact.clone(),
+            ..Bar::default()
+        }
+    }
+}
+
 impl Recovery {
     /// Small, cancellable tail repair shares the same transport budget as history.
     /// It deliberately does not mark the complete retained history as reconciled.
@@ -145,10 +181,17 @@ impl Recovery {
         if !slot.is_trading() {
             return Ok(0);
         }
-        let records = slot.records();
-        let capacity = slot.capacity();
+        let (capacity, records) = slot.select_bars(|series| {
+            (
+                series.capacity(),
+                series
+                    .iter_records()
+                    .map(|(bar, closed)| RecoveryRecord::new(bar, closed))
+                    .collect::<Vec<_>>(),
+            )
+        });
         let cold = !initialized
-            && records.iter().filter(|r| r.1).count() < capacity.saturating_sub(1).max(1);
+            && records.iter().filter(|r| r.closed).count() < capacity.saturating_sub(1).max(1);
         let page_limit = if slot.market == Market::Spot {
             1000
         } else {
@@ -221,22 +264,30 @@ impl Recovery {
             let mut start = records
                 .iter()
                 .rev()
-                .find(|r| r.1)
+                .find(|r| r.closed)
                 .or_else(|| records.last())
-                .map(|r| r.0.open_time)
+                .map(|r| r.open_time)
                 .unwrap_or(0);
             // Finals and synthetic fills can be revised upstream. Revisit Java's bounded
             // refresh window even when the stream is healthy and the history has no holes.
-            if let Some((bar, _)) = records.get(records.len().saturating_sub(configured_refresh)) {
+            if let Some(bar) = records.get(records.len().saturating_sub(configured_refresh)) {
                 start = start.min(bar.open_time);
             }
             // Revisit the earliest gap/nonfinal, including holes before the newest bar.
-            for (i, (bar, closed)) in records.iter().enumerate() {
-                if !closed {
+            for (i, bar) in records.iter().enumerate() {
+                if !bar.closed {
                     start = start.min(bar.open_time);
                 }
-                if i > 0 && next_open(&records[i - 1].0) < bar.open_time {
-                    start = start.min(next_open(&records[i - 1].0));
+                if i > 0 {
+                    let previous = &records[i - 1];
+                    let next = if calendar_month {
+                        previous.close_time.saturating_add(1)
+                    } else {
+                        previous.open_time.saturating_add(slot.interval.millis())
+                    };
+                    if next < bar.open_time {
+                        start = start.min(next);
+                    }
                 }
             }
             // A long outage only needs the retained window, not unbounded historical work.
@@ -297,8 +348,8 @@ impl Recovery {
         let mut previous = records
             .iter()
             .rev()
-            .find(|r| r.0.open_time < fetched[0].open_time)
-            .map(|r| r.0.clone());
+            .find(|r| r.open_time < fetched[0].open_time)
+            .map(RecoveryRecord::synthetic_anchor);
         let mut committed = 0_usize;
         for bar in fetched {
             if let Some(prev) = &previous
@@ -346,26 +397,32 @@ impl Recovery {
             }
             previous = Some(bar);
         }
-        let records = slot.records();
+        // Validate the retained view under one read lock; no second full-history
+        // allocation, and readiness checks see one consistent snapshot.
+        let (continuous, finalized, latest_close) = slot.select_bars(|series| {
+            let mut previous: Option<&Bar> = None;
+            let mut continuous = true;
+            let mut finalized = true;
+            for (bar, closed) in series.iter_records() {
+                if let Some(prev) = previous {
+                    continuous &=
+                        next_open(prev) == bar.open_time && prev.close_time < bar.open_time;
+                }
+                finalized &= closed || bar.close_time > snapshot_time;
+                previous = Some(bar);
+            }
+            (continuous, finalized, previous.map(|bar| bar.close_time))
+        });
         anyhow::ensure!(
-            records.windows(2).all(|w| {
-                next_open(&w[0].0) == w[1].0.open_time && w[0].0.close_time < w[1].0.open_time
-            }),
+            continuous,
             "REST recovery left a retained history gap or overlap"
         );
-        anyhow::ensure!(
-            records
-                .iter()
-                .all(|(bar, closed)| *closed || bar.close_time > snapshot_time),
-            "REST recovery left an expired nonfinal bar"
-        );
+        anyhow::ensure!(finalized, "REST recovery left an expired nonfinal bar");
         // A short/new listing is valid, but old-only responses cannot claim fresh readiness.
-        let latest = slot
-            .latest()
-            .ok_or_else(|| anyhow::anyhow!("empty series after recovery"))?
-            .0;
+        let latest_close =
+            latest_close.ok_or_else(|| anyhow::anyhow!("empty series after recovery"))?;
         anyhow::ensure!(
-            latest.close_time >= snapshot_time - self.config.freshness_grace_ms as i64,
+            latest_close >= snapshot_time - self.config.freshness_grace_ms as i64,
             "REST tail is stale"
         );
         Ok(count)
@@ -404,4 +461,62 @@ pub(crate) fn latest_target(interval: Interval, now: i64) -> (i64, i64) {
     }
     let boundary = interval.boundary(now);
     (boundary - interval.millis(), boundary)
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    use kline_core::NumberType;
+
+    #[test]
+    fn compact_recovery_anchor_preserves_pre_request_close_in_every_number_mode() {
+        for mode in [
+            NumberType::Double,
+            NumberType::Float,
+            NumberType::String,
+            NumberType::BigDecimal,
+        ] {
+            let mut original = Bar {
+                open_time: 0,
+                close_time: 3_599_999,
+                trades: 57,
+                ..Bar::default()
+            };
+            original
+                .set_numbers(
+                    mode,
+                    [
+                        "1.1",
+                        "9.9",
+                        "0.1",
+                        "1.234567890123456789",
+                        "123",
+                        "456",
+                        "78",
+                        "90",
+                    ],
+                )
+                .unwrap();
+            let expected = original.synthetic_after(3_600_000, 3_600_000);
+            let record = RecoveryRecord::new(&original, true);
+            // A stream update while REST is in flight must not change the snapshot
+            // predecessor chosen for a gap preceding the first returned REST bar.
+            original
+                .set_numbers(mode, ["3", "3", "3", "3", "1", "1", "1", "1"])
+                .unwrap();
+            let actual = record
+                .synthetic_anchor()
+                .synthetic_after(3_600_000, 3_600_000);
+            assert_eq!(actual, expected, "{mode:?}");
+            assert_eq!(actual.number_type, mode);
+            assert_eq!(
+                binance_wire::stored_numbers(&actual),
+                binance_wire::stored_numbers(&expected)
+            );
+            assert_eq!(record.open_time, 0);
+            assert_eq!(record.close_time, 3_599_999);
+            assert!(record.closed);
+        }
+        assert!(std::mem::size_of::<RecoveryRecord>() < std::mem::size_of::<(Bar, bool)>());
+    }
 }
