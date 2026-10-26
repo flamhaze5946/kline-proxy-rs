@@ -330,6 +330,11 @@ async fn answer(state: HttpState, market: Market, p: PostBody, with_evidence: bo
                 .insert(crate::diagnostics::AnsweredFor(reply.boundary));
             response
         }
+        Err(cause) if crate::evidence_bulk::is_symbol_limit(&cause) => error(
+            StatusCode::BAD_REQUEST,
+            -1102,
+            "evidence symbol count exceeds directory capacity 100000",
+        ),
         Err(ServiceError::Evidence) => {
             error(StatusCode::BAD_REQUEST, -1102, "Invalid evidence request")
         }
@@ -438,4 +443,65 @@ async fn metrics(
         let _ = writeln!(text, "# TYPE kline_{name} gauge\nkline_{name} {value}");
     }
     crate::management::metrics_response(text, &headers, &params)
+}
+
+#[cfg(test)]
+mod fix2_tests {
+    use super::*;
+    use crate::{Catalog, Settings, SystemClock, evidence::EvidenceSettings};
+    use http_body_util::BodyExt;
+    use kline_core::NumberType;
+    #[tokio::test]
+    async fn normalized_symbol_overflow_is_400_with_a_reason_and_no_publication() {
+        let engine = Engine::new(
+            Catalog::new(vec![]).unwrap(),
+            Arc::new(SystemClock { offset_ms: 0 }),
+            Settings {
+                number_type: NumberType::String,
+                evidence: Some(EvidenceSettings::default()),
+                ..Settings::default()
+            },
+        );
+        engine.refresh_catalog(vec![]).unwrap();
+        let before = (
+            engine.cache_sizes(),
+            engine.breaker_snapshot(),
+            engine.metrics.responses_built.load(Ordering::Relaxed),
+        );
+        let state = HttpState {
+            engine: engine.clone(),
+            requests: Arc::new(engine.http_gate()),
+            readiness: None,
+            strict_readiness: true,
+        };
+        let body = PostBody {
+            interval: Some("1m".into()),
+            limit: Some(100),
+            closed_only: Some(true),
+            symbols: Some(
+                (0..=crate::catalog::MAX_SERIES)
+                    .map(|i| Some(format!("UNKNOWN{i}")))
+                    .collect(),
+            ),
+        };
+        let response = answer(state, Market::Future, body, true).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let json: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert!(
+            json["msg"]
+                .as_str()
+                .unwrap()
+                .contains("symbol count exceeds directory capacity 100000")
+        );
+        assert_eq!(
+            (
+                engine.cache_sizes(),
+                engine.breaker_snapshot(),
+                engine.metrics.responses_built.load(Ordering::Relaxed)
+            ),
+            before
+        );
+    }
 }

@@ -208,8 +208,25 @@ impl Engine {
         let mut attempts = 0;
         while attempts < 4 {
             let now = not_before.map_or_else(|| self.bulk_now_ms(), |b| self.bulk_now_ms().max(b));
-            let (key, symbols) = if with_evidence {
-                self.evidence_key(&query, interval, now)
+            let selection = if with_evidence {
+                match self.select_evidence(&query, interval, now) {
+                    Ok(selection) => Some(selection),
+                    Err(error) if crate::evidence_bulk::is_stale_evidence(&error) => {
+                        attempts += 1;
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else {
+                None
+            };
+            let now = if with_evidence {
+                self.bulk_now_ms().max(not_before.unwrap_or(i64::MIN))
+            } else {
+                now
+            };
+            let (key, symbols) = if let Some(selection) = &selection {
+                (selection.key.clone(), selection.symbols.clone())
             } else {
                 (
                     Key {
@@ -300,7 +317,11 @@ impl Engine {
                             // cancelled leader neither restarts nor extends the final wait,
                             // even if the clock has been stepped back meanwhile.
                             let wait = if with_evidence {
-                                self.wait_evidence_final(&key, final_deadline).await
+                                self.wait_evidence_final(
+                                    selection.as_ref().unwrap(),
+                                    final_deadline,
+                                )
+                                .await?
                             } else {
                                 self.wait_final(&key, final_deadline).await
                             };
@@ -308,7 +329,7 @@ impl Engine {
                             let queued = std::time::Instant::now();
                             let engine = self.clone();
                             let build_key = key.clone();
-                            let build_symbols = symbols.clone();
+                            let build_selection = selection.clone();
                             let large = key.ids.len().saturating_mul(key.limit) > 1024;
                             let reply = self
                                 .builds
@@ -316,9 +337,8 @@ impl Engine {
                                     engine.metrics.work.record(3, queued.elapsed());
                                     let started = std::time::Instant::now();
                                     let reply = if with_evidence {
-                                        engine.build_evidence_body(
-                                            &build_key,
-                                            &build_symbols,
+                                        engine.build_evidence_selected(
+                                            build_selection.as_ref().unwrap(),
                                             wait.waited_ms,
                                         )
                                     } else {
@@ -460,9 +480,17 @@ impl Engine {
             waited_ms: start.elapsed().as_millis() as u64,
         }
     }
-    async fn wait_evidence_final(&self, key: &Key, deadline: Instant) -> Wait {
+    async fn wait_evidence_final(
+        &self,
+        selection: &crate::evidence_bulk::EvidenceSelection,
+        deadline: Instant,
+    ) -> Result<Wait, ServiceError> {
+        let key = &selection.key;
         let start = Instant::now();
         loop {
+            if !self.evidence_selection_current(selection) {
+                return Err(crate::evidence_bulk::stale_evidence());
+            }
             let mut changes = futures_util::stream::FuturesUnordered::new();
             for &id in key.ids.iter() {
                 let mut rx = self.catalog.slot(id).subscribe_changes();
@@ -480,11 +508,14 @@ impl Engine {
                 })
                 .collect();
             if pending.is_empty() || Instant::now() >= deadline {
-                return Wait {
+                if !self.evidence_selection_current(selection) {
+                    return Err(crate::evidence_bulk::stale_evidence());
+                }
+                return Ok(Wait {
                     pending,
                     not_trading: vec![],
                     waited_ms: start.elapsed().as_millis() as u64,
-                };
+                });
             }
             tokio::select! {_=changes.next()=>{},_=tokio::time::sleep_until(deadline)=>{},_=tokio::time::sleep(Duration::from_millis(100))=>{}}
         }

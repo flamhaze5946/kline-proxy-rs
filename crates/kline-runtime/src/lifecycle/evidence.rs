@@ -11,14 +11,33 @@ pub(super) async fn reconcile(
     api: Arc<RestApi>,
     config: RestConfig,
     health: Arc<Health>,
+    stop: watch::Receiver<bool>,
+) {
+    reconcile_state(
+        engine,
+        api,
+        config,
+        health,
+        stop,
+        Duration::from_millis(250),
+        Vec::new(),
+    )
+    .await;
+}
+async fn reconcile_state(
+    engine: Arc<Engine>,
+    api: Arc<RestApi>,
+    config: RestConfig,
+    health: Arc<Health>,
     mut stop: watch::Receiver<bool>,
+    tick_period: Duration,
+    mut records: Vec<Option<TaskRecord>>,
 ) {
     let recovery = Arc::new(Recovery {
         engine: engine.clone(),
         api,
         config: config.clone(),
     });
-    let mut records: Vec<Option<TaskRecord>> = Vec::new();
     let mut tasks: JoinSet<(
         usize,
         crate::evidence_schedule::Attempt,
@@ -29,7 +48,7 @@ pub(super) async fn reconcile(
     let mut sync_running = 0;
     let settings = engine.settings().evidence.as_ref().unwrap();
     let mut budget = FallbackBudget::new(settings.fallback_weight_per_minute);
-    let mut tick = tokio::time::interval(Duration::from_millis(250));
+    let mut tick = tokio::time::interval(tick_period);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let interval = (config.reconcile_seconds * 1000) as i64;
     'running: while !*stop.borrow() {
@@ -44,7 +63,10 @@ pub(super) async fn reconcile(
         {
             match result {
                 Ok((id, attempt, result)) => {
-                    let attempt: crate::evidence_schedule::Attempt = attempt;
+                    let mut attempt: crate::evidence_schedule::Attempt = attempt;
+                    if attempt.kind == TaskKind::History && engine.catalog.slot(id).is_trading() {
+                        attempt.confirm_lifecycle = false;
+                    }
                     if attempt.kind == TaskKind::Fallback {
                         fallback_running -= 1;
                     } else {
@@ -232,13 +254,16 @@ pub(super) async fn reconcile(
                 } else {
                     recovery.evidence_sync_request(id, kind != TaskKind::Startup, now)
                 };
-                let attempt = record.begin(
+                let mut attempt = record.begin(
                     kind,
                     request.range,
                     None,
                     epochs[id],
                     slots[id].gap_generation(),
                 );
+                if kind == TaskKind::History && !slots[id].is_trading() {
+                    attempt.confirm_lifecycle = true;
+                }
                 sync_running += 1;
                 let r = recovery.clone();
                 tasks.spawn(
@@ -276,4 +301,288 @@ pub(super) async fn reconcile(
     health.stopped.store(true, Ordering::Release);
     tasks.abort_all();
     while tasks.join_next().await.is_some() {}
+}
+
+#[cfg(test)]
+mod fix2_tests {
+    use super::*;
+    use axum::{
+        Json, Router,
+        extract::{Query, State},
+        routing::get,
+    };
+    use kline_core::{
+        Bar, Interval, NumberType, Source, Update,
+        evidence::{EvidenceState, EvidenceUpdate},
+    };
+    use kline_service::{Catalog, Instrument, Settings, evidence::EvidenceSettings};
+    use std::{
+        collections::{HashMap, HashSet},
+        num::NonZeroUsize,
+        sync::atomic::AtomicUsize,
+    };
+    const B: i64 = 6_000_000_000;
+    struct TestClock(AtomicI64);
+    impl Clock for TestClock {
+        fn now_ms(&self) -> i64 {
+            self.0.load(Ordering::Acquire)
+        }
+    }
+    fn bar(open: i64) -> Bar {
+        let mut b = Bar {
+            open_time: open,
+            close_time: open + 59999,
+            trades: 1,
+            ..Bar::default()
+        };
+        b.set_numbers(NumberType::String, ["1"; 8]).unwrap();
+        b
+    }
+    fn engine(count: usize, clock: Arc<TestClock>) -> Arc<Engine> {
+        Engine::new(
+            Catalog::new(
+                (0..count)
+                    .map(|i| Instrument {
+                        market: Market::Future,
+                        symbol: format!("S{i:04}"),
+                        interval: Interval::parse("1m").unwrap(),
+                        trading: true,
+                        continuous: Some((format!("S{i:04}"), "PERPETUAL".into())),
+                        capacity: NonZeroUsize::new(241).unwrap(),
+                    })
+                    .collect(),
+            )
+            .unwrap(),
+            clock,
+            Settings {
+                number_type: NumberType::String,
+                evidence: Some(EvidenceSettings::default()),
+                ..Settings::default()
+            },
+        )
+    }
+    fn config() -> RestConfig {
+        RestConfig {
+            workers: 1,
+            latest_repair_workers: 2,
+            sync_clock: false,
+            boundary_guard_before_ms: 0,
+            boundary_guard_after_ms: 0,
+            hour_boundary_guard_before_ms: 0,
+            hour_boundary_guard_after_ms: 0,
+            freshness_grace_ms: 300000,
+            ..RestConfig::default()
+        }
+    }
+    #[tokio::test]
+    async fn fix2_reconcile_dispatches_all_750_equal_e_symbols_despite_low_id_failures() {
+        struct Mock {
+            clock: Arc<TestClock>,
+            seen: parking_lot::Mutex<HashSet<String>>,
+            calls: AtomicUsize,
+            progress: watch::Sender<usize>,
+            stop: watch::Sender<bool>,
+        }
+        async fn handler(
+            State(s): State<Arc<Mock>>,
+            Query(q): Query<HashMap<String, String>>,
+        ) -> Json<serde_json::Value> {
+            assert_eq!(q["limit"], "99");
+            let call = s.calls.fetch_add(1, Ordering::AcqRel) + 1;
+            s.clock.0.fetch_add(1000, Ordering::AcqRel);
+            s.seen.lock().insert(q["symbol"].clone());
+            s.progress.send_replace(call);
+            if call >= 900 {
+                let _ = s.stop.send(true);
+            }
+            let id = q["symbol"][1..].parse::<usize>().unwrap();
+            if id < 60 {
+                return Json(serde_json::json!([]));
+            }
+            let start = q["startTime"].parse::<i64>().unwrap();
+            let end = q["endTime"].parse::<i64>().unwrap();
+            let rows: Vec<_> = (start..=end)
+                .step_by(60000)
+                .take(99)
+                .map(|t| serde_json::to_value(binance_wire::DisplayBar(bar(t))).unwrap())
+                .collect();
+            Json(serde_json::Value::Array(rows))
+        }
+        let clock = Arc::new(TestClock(AtomicI64::new(B + 10000)));
+        let e = engine(750, clock.clone());
+        for id in 0..750 {
+            e.commit(
+                id,
+                Update {
+                    bar: bar(B - 120 * MINUTE),
+                    closed: false,
+                    source: Source::Rest,
+                    event_time: None,
+                    sequence: 0,
+                },
+            )
+            .unwrap();
+        }
+        let (stop, rx) = watch::channel(false);
+        let (progress, mut changes) = watch::channel(0);
+        let state = Arc::new(Mock {
+            clock,
+            seen: parking_lot::Mutex::new(HashSet::new()),
+            calls: AtomicUsize::new(0),
+            progress,
+            stop: stop.clone(),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/fapi/v1/klines", get(handler))
+            .with_state(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let api = RestApi::new_with_type(&url, &url, 6000, NumberType::String).unwrap();
+        let health = Health::new(e.clone(), vec![], Arc::new(SyncedClock::new(0)), false);
+        // Seed the already initialized scene from J74. Actual dispatch, sorting,
+        // consumption, limiter, HTTP and completion all run through reconcile.
+        let records = (0..750)
+            .map(|_| {
+                let mut r = TaskRecord::new(B + 10000);
+                r.initialized = true;
+                r.capacity = 241;
+                r.routine.due = i64::MAX;
+                r.history.due = i64::MAX;
+                Some(r)
+            })
+            .collect();
+        let task = tokio::spawn(reconcile_state(
+            e,
+            api,
+            config(),
+            health,
+            rx,
+            Duration::from_millis(1),
+            records,
+        ));
+        tokio::time::timeout(Duration::from_secs(90), async {
+            while state.seen.lock().len() < 750 && state.calls.load(Ordering::Acquire) < 900 {
+                changes.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        let _ = stop.send(true);
+        task.await.unwrap();
+        server.abort();
+        assert_eq!(
+            state.seen.lock().len(),
+            750,
+            "real reconcile starved symbols after {} attempts",
+            state.calls.load(Ordering::Acquire)
+        );
+        assert!(state.calls.load(Ordering::Acquire) < 900);
+    }
+    #[tokio::test]
+    async fn fix2_routine_failure_then_trading_history_success_cannot_confirm_readiness() {
+        struct Mock {
+            history: AtomicUsize,
+        }
+        async fn handler(
+            State(s): State<Arc<Mock>>,
+            Query(q): Query<HashMap<String, String>>,
+        ) -> Json<serde_json::Value> {
+            if q["limit"] == "99" {
+                return Json(serde_json::json!([]));
+            }
+            s.history.fetch_add(1, Ordering::AcqRel);
+            Json(serde_json::json!([
+                binance_wire::DisplayBar(bar(B - 200 * MINUTE)),
+                binance_wire::DisplayBar(bar(B - 199 * MINUTE))
+            ]))
+        }
+        let clock = Arc::new(TestClock(AtomicI64::new(B + 1500)));
+        let e = engine(1, clock);
+        e.commit(
+            0,
+            Update {
+                bar: bar(B - 200 * MINUTE),
+                closed: false,
+                source: Source::Rest,
+                event_time: None,
+                sequence: 0,
+            },
+        )
+        .unwrap();
+        e.commit(
+            0,
+            Update {
+                bar: bar(B - MINUTE),
+                closed: true,
+                source: Source::Stream,
+                event_time: Some(B),
+                sequence: 1,
+            },
+        )
+        .unwrap();
+        for open in (B - 98 * MINUTE..B).step_by(60000) {
+            e.commit_evidence(0, EvidenceUpdate::Rest(bar(open)))
+                .unwrap();
+        }
+        assert!(e.catalog.slot(0).gap_generation() > 0);
+        let state = Arc::new(Mock {
+            history: AtomicUsize::new(0),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/fapi/v1/klines", get(handler))
+            .with_state(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let status = Arc::new(StreamStatus::default());
+        status.epoch.store(1, Ordering::Release);
+        let feed = Feed {
+            market: Market::Future,
+            status,
+            ids: Some(Arc::from([0])),
+        };
+        let epoch = feed.token();
+        assert_ne!(epoch, 0);
+        let health = Health::new(e.clone(), vec![feed], Arc::new(SyncedClock::new(0)), false);
+        let mut record = TaskRecord::new(B + 1500);
+        record.initialized = true;
+        record.observe(B + 1500, epoch, 241);
+        record.epoch = 0;
+        record.gap = 0;
+        let (stop, rx) = watch::channel(false);
+        let task = tokio::spawn(reconcile_state(
+            e.clone(),
+            RestApi::new_with_type(&url, &url, 6000, NumberType::String).unwrap(),
+            config(),
+            health.clone(),
+            rx,
+            Duration::from_millis(1),
+            vec![Some(record)],
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if state.history.load(Ordering::Acquire) > 0
+                    && e.catalog.slot(0).evidence_record(B - 200 * MINUTE).state
+                        == EvidenceState::RestFinal
+                    && health.detail.read()["rest_jobs"] == 0
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!health.series.load()[0].ready);
+        assert_eq!(health.series.load()[0].epoch, 0);
+        assert_eq!(health.series.load()[0].gap, 0);
+        let _ = stop.send(true);
+        task.await.unwrap();
+        server.abort();
+    }
 }

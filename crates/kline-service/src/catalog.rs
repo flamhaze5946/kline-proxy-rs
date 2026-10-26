@@ -33,6 +33,7 @@ pub struct Slot {
     not_trading_since: AtomicI64,
     tracked: AtomicBool,
     pub(crate) tracking_generation: AtomicU64,
+    pub(crate) evidence_lifecycle: Mutex<()>,
     pub last_stream_ms: AtomicI64,
     pub(crate) state: RwLock<Series>,
     pub(crate) changed: watch::Sender<u64>,
@@ -198,6 +199,8 @@ impl Slot {
         }
     }
 }
+pub(crate) const MAX_SERIES: usize = 100_000;
+
 type SymbolIndex = HashMap<(Market, Interval), HashMap<String, usize>>;
 type ContinuousIndex = HashMap<Interval, HashMap<String, HashMap<String, usize>>>;
 pub struct CatalogView {
@@ -292,7 +295,7 @@ impl Catalog {
             let id = if let Some(&id) = ids.get(&key) {
                 id
             } else {
-                if slots.len() >= 100_000 {
+                if slots.len() >= MAX_SERIES {
                     return Err("directory exceeds 100000 lifetime series".into());
                 }
                 let id = slots.len();
@@ -307,6 +310,7 @@ impl Catalog {
                     not_trading_since: AtomicI64::new(-1),
                     tracked: AtomicBool::new(true),
                     tracking_generation: AtomicU64::new(0),
+                    evidence_lifecycle: Mutex::new(()),
                     last_stream_ms: AtomicI64::new(0),
                     state: RwLock::new({
                         let mut series = Series::new(i.capacity);
@@ -344,6 +348,10 @@ impl Catalog {
         for i in &instruments {
             let id = symbols[&(i.market, i.interval)][&i.symbol];
             let s = &slots[id];
+            let _lifecycle = self
+                .evidence_enabled
+                .load(Ordering::Acquire)
+                .then(|| s.evidence_lifecycle.lock());
             let mut state = s.state.write();
             if state.capacity() != i.capacity.get() {
                 state.resize(i.capacity);
@@ -356,8 +364,15 @@ impl Catalog {
         }
         let mut removed = 0;
         for (id, s) in slots.iter().enumerate() {
+            let _lifecycle = self
+                .evidence_enabled
+                .load(Ordering::Acquire)
+                .then(|| s.evidence_lifecycle.lock());
             if !wanted.contains(&id) && s.tracked.swap(false, Ordering::AcqRel) {
                 removed += 1;
+                if self.evidence_enabled.load(Ordering::Acquire) {
+                    s.tracking_generation.fetch_add(1, Ordering::Release);
+                }
                 s.trading.store(false, Ordering::Release);
                 let mut state = s.state.write();
                 state.clear();

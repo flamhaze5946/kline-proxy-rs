@@ -11,7 +11,7 @@ use std::{
 };
 use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 
-#[derive(Clone, Hash, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct Key {
     pub market: Market,
     pub interval: Interval,
@@ -180,6 +180,38 @@ impl Cache {
         let key = CacheKey {
             base: key,
             evidence,
+        };
+        // Evidence validation happens outside the global cache mutex. Recheck
+        // only those exact Arc candidates once the mutex is reacquired.
+        let validations = key.evidence.as_ref().map(|_| {
+            let candidates = {
+                let state = self.state.lock();
+                state
+                    .ready
+                    .get(&key)
+                    .map(|r| r.reply.clone())
+                    .into_iter()
+                    .chain(state.flights.get(&key).and_then(|e| e.cell.get()).cloned())
+                    .collect::<Vec<_>>()
+            };
+            candidates
+                .into_iter()
+                .map(|reply| {
+                    let valid = current(&reply);
+                    (reply, valid)
+                })
+                .collect::<Vec<_>>()
+        });
+        let current = |reply: &BulkReply| {
+            validations.as_ref().map_or_else(
+                || current(reply),
+                |checks| {
+                    checks
+                        .iter()
+                        .find(|(r, _)| std::ptr::eq(r.as_ref(), reply))
+                        .is_some_and(|(_, valid)| *valid)
+                },
+            )
         };
         let mut state = self.state.lock();
         if let Some(cached) = state.ready.get(&key)
@@ -479,5 +511,28 @@ mod tests {
         drop(other);
         assert_eq!((cache.sizes().1, cache.holders()), (0, 0));
         assert_eq!(cache.slots.available_permits(), 1);
+    }
+    #[test]
+    fn fix2_evidence_current_callback_runs_outside_the_global_cache_mutex() {
+        let cache = cache(1);
+        let key = Key {
+            closed_only: false,
+            ..key()
+        };
+        let symbols: Arc<[String]> = Arc::from(["BTCUSDT".into()]);
+        cache.put_evidence(key.clone(), symbols.clone(), Arc::new(BulkReply::empty()));
+        assert!(matches!(
+            cache.get_evidence(
+                key,
+                symbols,
+                |_| {
+                    assert!(cache.state.try_lock().is_some());
+                    true
+                },
+                None,
+                tokio::time::Instant::now()
+            ),
+            Ok(Lookup::Ready(_))
+        ));
     }
 }

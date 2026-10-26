@@ -39,6 +39,7 @@ impl Demand {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Attempt {
     pub kind: TaskKind,
+    pub confirm_lifecycle: bool,
     incarnation: u64,
     revision: u64,
     pub epoch: u64,
@@ -180,6 +181,7 @@ impl TaskRecord {
         self.running = true;
         Attempt {
             kind,
+            confirm_lifecycle: matches!(kind, TaskKind::Startup | TaskKind::Routine),
             incarnation: self.incarnation,
             revision,
             epoch,
@@ -207,7 +209,7 @@ impl TaskRecord {
                 };
                 self.history.due = now.saturating_add(interval_ms);
             }
-            if attempt.kind != TaskKind::Fallback {
+            if attempt.confirm_lifecycle {
                 self.epoch = attempt.epoch;
                 self.gap = attempt.gap;
             }

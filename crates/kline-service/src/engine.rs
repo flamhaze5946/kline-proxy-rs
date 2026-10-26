@@ -121,6 +121,13 @@ impl Engine {
             None => crate::connect_pacer::ConnectPacer::default(),
         });
         let catalog_loaded = catalog.generation() > 0;
+        let evidence = crate::evidence::EvidenceRuntime::default();
+        if settings.evidence.is_some() {
+            evidence.publish_directory(&catalog);
+        }
+        evidence
+            .catalog_loaded
+            .store(catalog_loaded, Ordering::Release);
         Arc::new(Self {
             catalog,
             windows,
@@ -136,13 +143,7 @@ impl Engine {
             builds: crate::build_pool::BuildPool::new(settings.concurrent_builds),
             settings,
             metrics: Metrics::default(),
-            evidence: {
-                let state = crate::evidence::EvidenceRuntime::default();
-                state
-                    .catalog_loaded
-                    .store(catalog_loaded, Ordering::Release);
-                state
-            },
+            evidence,
             diagnostics: crate::diagnostics::Diagnostics::default(),
             connects,
             revision: [AtomicU64::new(0), AtomicU64::new(0)],
@@ -313,6 +314,46 @@ impl Engine {
     ) -> Result<Commit, kline_core::InvalidBar> {
         self.commit_evidence_in_generation(id, input, None)
     }
+    /// Publish one validated REST page in the same critical section as revocation.
+    /// False means the tracked lifetime ended before the first publication.
+    pub fn commit_evidence_page(
+        &self,
+        id: usize,
+        tracking_generation: u64,
+        updates: Vec<kline_core::evidence::EvidenceUpdate>,
+    ) -> Result<bool, kline_core::InvalidBar> {
+        self.commit_evidence_page_with(id, tracking_generation, updates, |_| {})
+    }
+    pub(crate) fn commit_evidence_page_with(
+        &self,
+        id: usize,
+        tracking_generation: u64,
+        updates: Vec<kline_core::evidence::EvidenceUpdate>,
+        mut after_row: impl FnMut(usize),
+    ) -> Result<bool, kline_core::InvalidBar> {
+        for input in &updates {
+            if let Some(bar) = input.bar() {
+                if bar.number_type != self.settings.number_type {
+                    return Err(kline_core::InvalidBar::Number);
+                }
+                kline_core::evidence::validate_bar(bar)?;
+            } else if input.open_time() < 0 || input.open_time() % 60_000 != 0 {
+                return Err(kline_core::InvalidBar::Time);
+            }
+        }
+        let slot = self.catalog.slot(id);
+        let _lifecycle = slot.evidence_lifecycle.lock();
+        if !slot.is_tracked() || slot.tracking_generation() != tracking_generation {
+            return Ok(false);
+        }
+        for (i, input) in updates.into_iter().enumerate() {
+            // All fallible checks precede publication; the lifetime cannot change here.
+            self.commit_evidence_in_generation(id, input, Some(tracking_generation))
+                .expect("prevalidated evidence page");
+            after_row(i);
+        }
+        Ok(true)
+    }
     /// Recovery binds every row publication to the same tracked lifetime, so an
     /// old response cannot resurrect an identity removed during its HTTP await.
     pub fn commit_evidence_in_generation(
@@ -438,30 +479,16 @@ impl Engine {
         let _writer = self
             .evidence_enabled()
             .then(|| self.evidence.catalog_writer.lock());
-        let removed: Vec<_> = if self.evidence_enabled() {
-            let wanted: std::collections::HashSet<_> = instruments
-                .iter()
-                .map(|i| (i.market, i.interval, i.symbol.as_str()))
-                .collect();
-            self.catalog
-                .slots()
-                .iter()
-                .filter(|slot| {
-                    slot.is_tracked()
-                        && !wanted.contains(&(slot.market, slot.interval, slot.symbol.as_ref()))
-                })
-                .cloned()
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let _directory_write = self
+            .evidence_enabled()
+            .then(|| self.evidence.begin_directory_write());
         let change = self.catalog.sync(instruments)?;
         if let Some(records) = retained {
             self.install_retained(records);
         }
         self.evidence.catalog_loaded.store(true, Ordering::Release);
-        for slot in removed {
-            slot.tracking_generation.fetch_add(1, Ordering::Release);
+        if self.evidence_enabled() {
+            self.evidence.publish_directory(&self.catalog);
         }
         if change.changed {
             self.windows.resize(self.catalog.slots().len());

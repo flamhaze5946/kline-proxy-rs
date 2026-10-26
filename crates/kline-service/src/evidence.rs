@@ -1,9 +1,11 @@
 //! Process evidence state. Row evidence itself lives under each Slot's series lock.
+use arc_swap::ArcSwap;
 use kline_core::evidence::{EvidenceRecord, EvidenceState};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
 
 #[derive(Clone, Debug)]
@@ -41,11 +43,69 @@ pub struct EvidenceConflict {
 #[derive(Default)]
 pub(crate) struct EvidenceRuntime {
     pub(crate) catalog_writer: Mutex<()>,
+    pub(crate) directory_epoch: AtomicU64,
+    pub(crate) directory: ArcSwap<EvidenceDirectory>,
     pub(crate) retained: RwLock<BTreeMap<String, crate::evidence_bulk::RetainedRecord>>,
     pub(crate) retained_generation: AtomicU64,
     pub(crate) catalog_loaded: AtomicBool,
     pub(crate) state: Mutex<EvidenceRuntimeState>,
 }
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct EvidenceIdentity {
+    pub id: usize,
+    pub definition: crate::Instrument,
+    pub tracking_generation: u64,
+    pub retained: Option<crate::evidence_bulk::RetainedRecord>,
+    pub since: Option<i64>,
+}
+#[derive(Default)]
+pub(crate) struct EvidenceDirectory {
+    pub generation: u64,
+    pub entries: BTreeMap<(kline_core::Market, kline_core::Interval, String), EvidenceIdentity>,
+}
+pub(crate) struct DirectoryWrite<'a>(&'a AtomicU64);
+impl Drop for DirectoryWrite<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+}
+impl EvidenceRuntime {
+    pub fn begin_directory_write(&self) -> DirectoryWrite<'_> {
+        self.directory_epoch
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        DirectoryWrite(&self.directory_epoch)
+    }
+    pub fn publish_directory(&self, catalog: &crate::Catalog) {
+        let retained = self.retained.read();
+        let mut view = EvidenceDirectory {
+            generation: catalog.generation(),
+            ..EvidenceDirectory::default()
+        };
+        for definition in catalog.instruments() {
+            let id = catalog
+                .find(definition.market, definition.interval, &definition.symbol)
+                .unwrap();
+            let slot = catalog.slot(id);
+            let identity = EvidenceIdentity {
+                id,
+                tracking_generation: slot.tracking_generation(),
+                retained: retained.get(&definition.symbol).cloned(),
+                since: slot.not_trading_since(),
+                definition,
+            };
+            view.entries.insert(
+                (
+                    identity.definition.market,
+                    identity.definition.interval,
+                    identity.definition.symbol.clone(),
+                ),
+                identity,
+            );
+        }
+        self.directory.store(Arc::new(view));
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct EvidenceRuntimeState {
     pub breaker: BreakerState,

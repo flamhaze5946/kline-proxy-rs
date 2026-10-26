@@ -233,6 +233,7 @@ impl Recovery {
         } else {
             request.range.first
         };
+        let mut updates = Vec::new();
         for bar in &bars {
             let verdict = bar.open_time >= first
                 && bar.open_time <= request.range.last
@@ -245,21 +246,17 @@ impl Recovery {
             if bar.open_time > request.range.last && !trading {
                 continue;
             }
-            self.engine.commit_evidence_in_generation(
-                id,
-                if verdict {
-                    EvidenceUpdate::Rest(bar.clone())
-                } else {
-                    EvidenceUpdate::Observation(Update {
-                        bar: bar.clone(),
-                        closed: false,
-                        source: Source::Rest,
-                        event_time: None,
-                        sequence: 0,
-                    })
-                },
-                Some(tracking_generation),
-            )?;
+            updates.push(if verdict {
+                EvidenceUpdate::Rest(bar.clone())
+            } else {
+                EvidenceUpdate::Observation(Update {
+                    bar: bar.clone(),
+                    closed: false,
+                    source: Source::Rest,
+                    event_time: None,
+                    sequence: 0,
+                })
+            });
         }
         // No gap outside this response can be absent. Bound the scan both by
         // its anchors and by minute retention, including very sparse cold pages.
@@ -271,17 +268,13 @@ impl Recovery {
         let gap_last = request.range.last.min(bars.last().unwrap().open_time);
         for open in (gap_first..=gap_last).step_by(MINUTE as usize) {
             if rest_verdict(&bars, open, request.end) == EvidenceState::Absent {
-                self.engine.commit_evidence_in_generation(
-                    id,
-                    EvidenceUpdate::Absent(open),
-                    Some(tracking_generation),
-                )?;
+                updates.push(EvidenceUpdate::Absent(open));
             }
         }
-        let slot = self.engine.catalog.slot(id);
         anyhow::ensure!(
-            slot.is_tracked() && slot.tracking_generation() == tracking_generation,
-            "evidence series removed during publication"
+            self.engine
+                .commit_evidence_page(id, tracking_generation, updates)?,
+            "evidence series removed before publication"
         );
         // Gaps, stale tails and pending rows are successful transport/commit;
         // only startup's own successful whole-window request initializes it.
