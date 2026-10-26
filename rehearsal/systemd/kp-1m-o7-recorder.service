@@ -1,0 +1,23 @@
+# 24 h O7 recorder (bounded by --hours; no restart: a crash is a recording gap to report, not to hide).
+[Unit]
+Description=kp-1m O7 evidence recorder (24 h)
+After=kp-1m-evidence.service
+Requires=kp-1m-evidence.service
+
+[Service]
+Type=simple
+User=kp1m
+Group=kp1m
+ExecStart=/usr/bin/python3 -I /opt/kp-1m/rehearsal/recorder_evidence.py --hours 24 \
+  --out /var/lib/kp-1m-o7/rec --base http://127.0.0.1:1891 --rest-proxy http://127.0.0.1:18980 \
+  --deltas 0.5,1.5,5 --limit 3 --probe-symbols auto:4 \
+  --ip-budget 1800 --kp-weight-per-minute 1200 --other-weight 0 --recorder-weight-cap 120
+Restart=no
+RuntimeMaxSec=25h
+MemoryMax=400M
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/kp-1m-o7
+UMask=0027
