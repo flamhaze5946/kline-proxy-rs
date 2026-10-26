@@ -187,6 +187,12 @@ impl Health {
     }
 }
 impl Readiness for Health {
+    fn evidence_query_ready(&self) -> bool {
+        !self.stopped.load(Ordering::Acquire)
+            && self.engine.evidence_catalog_loaded()
+            && self.clock_ready()
+    }
+
     fn is_ready(&self) -> bool {
         self.ready.load(Ordering::Acquire)
             && self.clock_ready()

@@ -40,6 +40,9 @@ struct HttpState {
 pub trait Readiness: Send + Sync {
     fn is_ready(&self) -> bool;
     fn details(&self) -> serde_json::Value;
+    fn evidence_query_ready(&self) -> bool {
+        self.is_ready()
+    }
     fn is_serving(&self) -> bool {
         self.is_ready()
     }
@@ -175,8 +178,12 @@ impl From<Params> for PostBody {
         }
     }
 }
-async fn future_get(State(s): State<HttpState>, Query(p): Query<Params>) -> Response {
-    if p.interval.is_none() {
+async fn future_get(
+    State(s): State<HttpState>,
+    uri: axum::http::Uri,
+    Query(p): Query<Params>,
+) -> Response {
+    if p.interval.is_none() && !evidence_param(&uri) {
         let mut response = error(
             StatusCode::INTERNAL_SERVER_ERROR,
             -1000,
@@ -189,10 +196,14 @@ async fn future_get(State(s): State<HttpState>, Query(p): Query<Params>) -> Resp
             ));
         return response;
     }
-    answer(s, Market::Future, p.into()).await
+    answer(s, Market::Future, p.into(), evidence_param(&uri)).await
 }
-async fn spot_get(State(s): State<HttpState>, Query(p): Query<Params>) -> Response {
-    if p.interval.is_none() {
+async fn spot_get(
+    State(s): State<HttpState>,
+    uri: axum::http::Uri,
+    Query(p): Query<Params>,
+) -> Response {
+    if p.interval.is_none() && !evidence_param(&uri) {
         let mut response = error(
             StatusCode::INTERNAL_SERVER_ERROR,
             -1000,
@@ -205,10 +216,11 @@ async fn spot_get(State(s): State<HttpState>, Query(p): Query<Params>) -> Respon
             ));
         return response;
     }
-    answer(s, Market::Spot, p.into()).await
+    answer(s, Market::Spot, p.into(), evidence_param(&uri)).await
 }
 async fn future_post(
     State(s): State<HttpState>,
+    uri: axum::http::Uri,
     OptionalJson(body): OptionalJson<PostBody>,
 ) -> Response {
     match body {
@@ -217,13 +229,14 @@ async fn future_post(
                 .as_deref()
                 .is_some_and(|s| !http_compat::is_blank(s)) =>
         {
-            answer(s, Market::Future, p).await
+            answer(s, Market::Future, p, evidence_param(&uri)).await
         }
         _ => missing(),
     }
 }
 async fn spot_post(
     State(s): State<HttpState>,
+    uri: axum::http::Uri,
     OptionalJson(body): OptionalJson<PostBody>,
 ) -> Response {
     match body {
@@ -232,7 +245,7 @@ async fn spot_post(
                 .as_deref()
                 .is_some_and(|s| !http_compat::is_blank(s)) =>
         {
-            answer(s, Market::Spot, p).await
+            answer(s, Market::Spot, p, evidence_param(&uri)).await
         }
         _ => missing(),
     }
@@ -240,7 +253,17 @@ async fn spot_post(
 fn missing() -> Response {
     error(StatusCode::BAD_REQUEST, -1102, "interval is required")
 }
-async fn answer(state: HttpState, market: Market, p: PostBody) -> Response {
+fn evidence_param(uri: &axum::http::Uri) -> bool {
+    axum::extract::Query::<Vec<(String, String)>>::try_from_uri(uri).is_ok_and(
+        |axum::extract::Query(pairs)| {
+            pairs
+                .iter()
+                .find(|(key, _)| key == "with_evidence")
+                .is_some_and(|(_, value)| value == "true")
+        },
+    )
+}
+async fn answer(state: HttpState, market: Market, p: PostBody, with_evidence: bool) -> Response {
     let Some(interval) = p.interval else {
         return missing();
     };
@@ -257,11 +280,30 @@ async fn answer(state: HttpState, market: Market, p: PostBody) -> Response {
             .filter(|s| !http_compat::is_blank(s))
             .collect(),
     };
-    if state.strict_readiness
-        && state
-            .readiness
-            .as_ref()
-            .is_some_and(|r| !r.query_ready(&query))
+    if with_evidence
+        && (!state.engine.evidence_enabled()
+            || !query.closed_only
+            || query.interval != "1m"
+            || market != Market::Future)
+    {
+        return error(
+            StatusCode::BAD_REQUEST,
+            -1102,
+            "evidence requires enabled futures 1m closed_only",
+        );
+    }
+    if (with_evidence && !state.engine.evidence_catalog_loaded())
+        || (with_evidence
+            && state
+                .readiness
+                .as_ref()
+                .is_some_and(|r| !r.evidence_query_ready()))
+        || (!with_evidence
+            && state.strict_readiness
+            && state
+                .readiness
+                .as_ref()
+                .is_some_and(|r| !r.query_ready(&query)))
     {
         return error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -269,7 +311,12 @@ async fn answer(state: HttpState, market: Market, p: PostBody) -> Response {
             "Requested market data is initializing or recovering",
         );
     }
-    match state.engine.bulk(query).await {
+    let result = if with_evidence {
+        state.engine.bulk_with_evidence(query).await
+    } else {
+        state.engine.bulk(query).await
+    };
+    match result {
         Ok(reply) => {
             let mut response = (
                 [(header::CONTENT_TYPE, "application/json")],
@@ -281,6 +328,9 @@ async fn answer(state: HttpState, market: Market, p: PostBody) -> Response {
                 .extensions_mut()
                 .insert(crate::diagnostics::AnsweredFor(reply.boundary));
             response
+        }
+        Err(ServiceError::Evidence) => {
+            error(StatusCode::BAD_REQUEST, -1102, "Invalid evidence request")
         }
         Err(ServiceError::Interval) => error(StatusCode::BAD_REQUEST, -1120, "Invalid interval."),
         Err(ServiceError::Busy) => error(

@@ -10,3 +10,6 @@ pub mod recovery;
 pub mod rest;
 pub mod storage;
 pub mod tickers;
+
+pub mod evidence_directory;
+pub mod evidence_state;

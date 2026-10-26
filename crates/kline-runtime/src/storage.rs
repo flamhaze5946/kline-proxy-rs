@@ -74,7 +74,7 @@ impl Store {
             s.is_tracked()
                 && self.enabled(s)
                 && s.durable_generation() != self.acknowledged.get(id).copied().unwrap_or(0)
-                && !s.is_empty()
+                && (engine.evidence_enabled() || !s.is_empty())
         })
     }
     pub fn restore(&mut self, engine: &Engine) -> RestoreReport {
@@ -120,6 +120,16 @@ impl Store {
             };
             match loaded {
                 Ok(bars) => {
+                    if engine.evidence_enabled()
+                        && bars.iter().any(|bar| {
+                            bar.open_time % 60_000 != 0
+                                || kline_core::evidence::decimal_fields(bar).is_err()
+                        })
+                    {
+                        report.corrupt += 1;
+                        tracing::warn!(symbol=%slot.symbol,"invalid evidence snapshot rows; REST recovery required");
+                        continue;
+                    }
                     if bars.is_empty() {
                         continue;
                     }
@@ -184,12 +194,12 @@ impl Store {
             let now = engine.now_ms();
             let (generation, mut bars) = slot.durable_snapshot(now);
             // Never replace useful disk history with an empty or entirely forming cache.
-            if bars.is_empty() {
+            if bars.is_empty() && !engine.evidence_enabled() {
                 report.skipped += 1;
                 continue;
             }
             let count = self.count(slot);
-            if count > bars.len() && self.path(slot).exists() {
+            if !engine.evidence_enabled() && count > bars.len() && self.path(slot).exists() {
                 match load(&self.path(slot), slot, now, engine.number_type()) {
                     Ok(previous) => {
                         let mut merged: std::collections::BTreeMap<_, _> =
@@ -354,7 +364,7 @@ fn load(path: &Path, slot: &Slot, now: i64, mode: NumberType) -> Result<Vec<Bar>
     anyhow::ensure!(raw.is_empty(), "trailing snapshot bytes");
     Ok(bars)
 }
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     let temporary = path.with_extension(format!(
         "tmp-{}-{}",
         std::process::id(),
@@ -377,4 +387,25 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
         let _ = fs::remove_file(temporary);
     }
     result
+}
+
+/// Expiry can precede creation of a live slot after a restart.
+pub fn remove_snapshot_identity(
+    root: &Path,
+    market: kline_core::Market,
+    interval: kline_core::Interval,
+    symbol: &str,
+) -> Result<()> {
+    let identity = format!(
+        "{}\0{}\0{}",
+        crate::config::market_name(market),
+        interval.code(),
+        symbol
+    );
+    let path = root.join(format!("{:x}.kpr", Sha256::digest(identity.as_bytes())));
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
 }

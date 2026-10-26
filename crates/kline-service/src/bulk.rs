@@ -28,6 +28,7 @@ pub struct BulkReply {
     /// The boundary of the period this reply was built for (the key's).
     pub boundary: i64,
     pub(crate) payload: Option<Arc<Payload>>,
+    pub(crate) evidence_stamp: Option<crate::evidence_bulk::EvidenceStamp>,
     // A current bar arriving (or the preceding bar becoming final) must replace
     // a cached provisional response immediately, without waiting for its TTL.
     forming_generations: Vec<u64>,
@@ -37,6 +38,8 @@ pub struct BulkReply {
 pub enum ServiceError {
     #[error("Invalid interval.")]
     Interval,
+    #[error("evidence requires enabled futures 1m closed_only")]
+    Evidence,
     #[error("response builder at capacity")]
     Busy,
     #[error("response encoding failed: {0}")]
@@ -56,6 +59,24 @@ pub(crate) struct Payload {
     data_status: Option<DataStatus>,
 }
 impl BulkReply {
+    pub(crate) fn evidence(
+        body: Bytes,
+        finalized: bool,
+        waited_ms: u64,
+        boundary: i64,
+        stamp: crate::evidence_bulk::EvidenceStamp,
+    ) -> Self {
+        Self {
+            body,
+            finalized,
+            waited_ms,
+            boundary,
+            payload: None,
+            evidence_stamp: Some(stamp),
+            forming_generations: vec![],
+            forming_valid_until: i64::MAX,
+        }
+    }
     pub(crate) fn cache_bytes(&self) -> usize {
         self.body.len()
             + self.payload.as_ref().map_or(0, |p| p.bytes.len())
@@ -70,6 +91,7 @@ impl BulkReply {
             waited_ms: 0,
             boundary: 0,
             payload: None,
+            evidence_stamp: None,
             forming_generations: vec![],
             forming_valid_until: i64::MAX,
         }
@@ -106,7 +128,7 @@ impl Engine {
     /// The time bulk decides its boundary by: with `host_clock_floor`, never earlier than this
     /// host's own clock, so a server-time estimate running behind cannot keep a request in the
     /// period before. Nothing outside bulk uses it.
-    fn bulk_now_ms(&self) -> i64 {
+    pub(crate) fn bulk_now_ms(&self) -> i64 {
         let estimate = self.clock.now_ms();
         if self.settings.host_clock_floor {
             estimate.max(self.clock.host_ms())
@@ -126,7 +148,10 @@ impl Engine {
                 .zip(&payload.generations)
                 .all(|(&id, &generation)| slots[id].window_generation() == generation)
     }
-    fn reply_current(&self, key: &Key, reply: &BulkReply, now: i64) -> bool {
+    pub(crate) fn reply_current(&self, key: &Key, reply: &BulkReply, now: i64) -> bool {
+        if let Some(stamp) = &reply.evidence_stamp {
+            return self.evidence_reply_current(key, stamp, now);
+        }
         if !key.closed_only {
             let slots = self.catalog.slots();
             return key.boundary == key.interval.boundary(now)
@@ -145,6 +170,26 @@ impl Engine {
             .map_or(!key.closed_only, |p| self.payload_current(key, p, now))
     }
     pub async fn bulk(self: &Arc<Self>, query: BulkQuery) -> Result<Arc<BulkReply>, ServiceError> {
+        self.bulk_inner(query, false).await
+    }
+    pub async fn bulk_with_evidence(
+        self: &Arc<Self>,
+        query: BulkQuery,
+    ) -> Result<Arc<BulkReply>, ServiceError> {
+        if !self.evidence_enabled()
+            || !query.closed_only
+            || query.interval != "1m"
+            || query.market != Market::Future
+        {
+            return Err(ServiceError::Evidence);
+        }
+        self.bulk_inner(query, true).await
+    }
+    async fn bulk_inner(
+        self: &Arc<Self>,
+        query: BulkQuery,
+        with_evidence: bool,
+    ) -> Result<Arc<BulkReply>, ServiceError> {
         let interval = Interval::parse(&query.interval).ok_or(ServiceError::Interval)?;
         // A closed_only request arriving just before an interval boundary (its sender's clock a
         // little ahead of ours) wants the bars that close at that boundary: wait for it, and from
@@ -163,14 +208,52 @@ impl Engine {
         let mut attempts = 0;
         while attempts < 4 {
             let now = not_before.map_or_else(|| self.bulk_now_ms(), |b| self.bulk_now_ms().max(b));
+            let symbols: Arc<[String]> = if with_evidence {
+                let mut symbols = if query.symbols.is_empty() {
+                    self.catalog
+                        .instruments()
+                        .into_iter()
+                        .filter(|i| i.market == query.market && i.interval == interval)
+                        .map(|i| i.symbol)
+                        .collect::<Vec<_>>()
+                } else {
+                    query
+                        .symbols
+                        .iter()
+                        .map(|s| crate::http_compat::java_trim(s).to_owned())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                };
+                symbols.sort();
+                symbols.dedup();
+                symbols.into()
+            } else {
+                Arc::from([])
+            };
+            if with_evidence
+                && symbols
+                    .len()
+                    .saturating_mul(query.limit.unwrap_or(5).clamp(1, 100) as usize)
+                    > 75000
+            {
+                return Err(ServiceError::Evidence);
+            }
             let key = Key {
                 market: query.market,
                 interval,
                 limit: query.limit.unwrap_or(5).clamp(1, 100) as usize,
                 closed_only: query.closed_only,
-                ids: self
-                    .catalog
-                    .normalize(query.market, interval, &query.symbols),
+                ids: if with_evidence {
+                    symbols
+                        .iter()
+                        .filter_map(|s| self.catalog.find(query.market, interval, s))
+                        .filter(|&id| self.catalog.slot(id).is_tracked())
+                        .collect::<Vec<_>>()
+                        .into()
+                } else {
+                    self.catalog
+                        .normalize(query.market, interval, &query.symbols)
+                },
                 boundary: interval.boundary(now),
                 revision: if query.closed_only {
                     self.catalog.generation()
@@ -199,12 +282,23 @@ impl Engine {
                     deadline
                 }
             };
-            let reply = match self.cache.get(
-                key.clone(),
-                |r| self.reply_current(&key, r, now),
-                slot.take(),
-                final_deadline,
-            )? {
+            let lookup = if with_evidence {
+                self.cache.get_evidence(
+                    key.clone(),
+                    symbols.clone(),
+                    |r| self.reply_current(&key, r, now),
+                    slot.take(),
+                    final_deadline,
+                )
+            } else {
+                self.cache.get(
+                    key.clone(),
+                    |r| self.reply_current(&key, r, now),
+                    slot.take(),
+                    final_deadline,
+                )
+            };
+            let reply = match lookup? {
                 Lookup::Full => {
                     // Measured from the request's arrival, so HTTP admission queueing counts.
                     let deadline = *admission_deadline.get_or_insert_with(|| {
@@ -236,24 +330,45 @@ impl Engine {
                             // The flight's own deadline: a follower that takes over from a
                             // cancelled leader neither restarts nor extends the final wait,
                             // even if the clock has been stepped back meanwhile.
-                            let wait = self.wait_final(&key, final_deadline).await;
+                            let wait = if with_evidence {
+                                self.wait_evidence_final(&key, final_deadline).await
+                            } else {
+                                self.wait_final(&key, final_deadline).await
+                            };
                             self.metrics.work.record(2, waiting.elapsed());
                             let queued = std::time::Instant::now();
                             let engine = self.clone();
                             let build_key = key.clone();
+                            let build_symbols = symbols.clone();
                             let large = key.ids.len().saturating_mul(key.limit) > 1024;
                             let reply = self
                                 .builds
                                 .run(large, move || {
                                     engine.metrics.work.record(3, queued.elapsed());
                                     let started = std::time::Instant::now();
-                                    let reply = engine.build_body(&build_key, wait, candidate);
+                                    let reply = if with_evidence {
+                                        engine.build_evidence_body(
+                                            &build_key,
+                                            &build_symbols,
+                                            wait.waited_ms,
+                                        )
+                                    } else {
+                                        engine.build_body(&build_key, wait, candidate)
+                                    };
                                     engine.metrics.work.record(4, started.elapsed());
                                     reply
                                 })
                                 .await??;
                             let reply = Arc::new(reply);
-                            self.cache.put(key.clone(), reply.clone());
+                            if with_evidence {
+                                self.cache.put_evidence(
+                                    key.clone(),
+                                    symbols.clone(),
+                                    reply.clone(),
+                                );
+                            } else {
+                                self.cache.put(key.clone(), reply.clone());
+                            }
                             Ok::<_, ServiceError>(reply)
                         })
                         .await?
@@ -263,7 +378,8 @@ impl Engine {
             attempts += 1;
             // A correction may race an in-flight build. Never let a later caller
             // inherit the completed old generation through the single-flight cell.
-            if (!key.closed_only && !self.reply_current(&key, &reply, self.bulk_now_ms()))
+            if ((with_evidence || !key.closed_only)
+                && !self.reply_current(&key, &reply, self.bulk_now_ms().max(key.boundary)))
                 || reply.payload.as_ref().is_some_and(|p| {
                     !self.payload_current(&key, p, self.bulk_now_ms().max(key.boundary))
                 })
@@ -356,6 +472,35 @@ impl Engine {
             pending: pending(),
             not_trading,
             waited_ms: start.elapsed().as_millis() as u64,
+        }
+    }
+    async fn wait_evidence_final(&self, key: &Key, deadline: Instant) -> Wait {
+        let start = Instant::now();
+        loop {
+            let mut changes = futures_util::stream::FuturesUnordered::new();
+            for &id in key.ids.iter() {
+                let mut rx = self.catalog.slot(id).subscribe_changes();
+                changes.push(async move {
+                    let _ = rx.changed().await;
+                });
+            }
+            let pending: Vec<_> = key
+                .ids
+                .iter()
+                .filter_map(|&id| {
+                    let slot = self.catalog.slot(id);
+                    (slot.is_trading() && self.needs_verdict(id, key.boundary - 60_000))
+                        .then(|| slot.symbol.clone())
+                })
+                .collect();
+            if pending.is_empty() || Instant::now() >= deadline {
+                return Wait {
+                    pending,
+                    not_trading: vec![],
+                    waited_ms: start.elapsed().as_millis() as u64,
+                };
+            }
+            tokio::select! {_=changes.next()=>{},_=tokio::time::sleep_until(deadline)=>{},_=tokio::time::sleep(Duration::from_millis(100))=>{}}
         }
     }
     fn build_body(
@@ -498,6 +643,7 @@ impl Engine {
             waited_ms: wait.waited_ms,
             boundary: key.boundary,
             payload: (stable && finalized).then_some(payload),
+            evidence_stamp: None,
             forming_generations,
             forming_valid_until,
         })

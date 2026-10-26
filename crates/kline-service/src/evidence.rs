@@ -1,8 +1,10 @@
 //! Process evidence state. Row evidence itself lives under each Slot's series lock.
 use kline_core::evidence::{EvidenceRecord, EvidenceState};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 
 #[derive(Clone, Debug)]
 pub struct EvidenceSettings {
@@ -39,6 +41,9 @@ pub struct EvidenceConflict {
 #[derive(Default)]
 pub(crate) struct EvidenceRuntime {
     pub(crate) catalog_writer: Mutex<()>,
+    pub(crate) retained: RwLock<BTreeMap<String, crate::evidence_bulk::RetainedRecord>>,
+    pub(crate) retained_generation: AtomicU64,
+    pub(crate) catalog_loaded: AtomicBool,
     pub(crate) state: Mutex<EvidenceRuntimeState>,
 }
 #[derive(Default)]

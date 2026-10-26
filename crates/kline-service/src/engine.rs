@@ -120,6 +120,7 @@ impl Engine {
             }
             None => crate::connect_pacer::ConnectPacer::default(),
         });
+        let catalog_loaded = catalog.generation() > 0;
         Arc::new(Self {
             catalog,
             windows,
@@ -135,7 +136,13 @@ impl Engine {
             builds: crate::build_pool::BuildPool::new(settings.concurrent_builds),
             settings,
             metrics: Metrics::default(),
-            evidence: crate::evidence::EvidenceRuntime::default(),
+            evidence: {
+                let state = crate::evidence::EvidenceRuntime::default();
+                state
+                    .catalog_loaded
+                    .store(catalog_loaded, Ordering::Release);
+                state
+            },
             diagnostics: crate::diagnostics::Diagnostics::default(),
             connects,
             revision: [AtomicU64::new(0), AtomicU64::new(0)],
@@ -409,6 +416,20 @@ impl Engine {
         &self,
         instruments: Vec<crate::Instrument>,
     ) -> Result<crate::catalog::CatalogChange, String> {
+        self.refresh_catalog_inner(instruments, None)
+    }
+    pub fn refresh_catalog_with_retained(
+        &self,
+        instruments: Vec<crate::Instrument>,
+        records: Vec<crate::evidence_bulk::RetainedRecord>,
+    ) -> Result<crate::catalog::CatalogChange, String> {
+        self.refresh_catalog_inner(instruments, Some(records))
+    }
+    fn refresh_catalog_inner(
+        &self,
+        instruments: Vec<crate::Instrument>,
+        retained: Option<Vec<crate::evidence_bulk::RetainedRecord>>,
+    ) -> Result<crate::catalog::CatalogChange, String> {
         let _writer = self
             .evidence_enabled()
             .then(|| self.evidence.catalog_writer.lock());
@@ -430,6 +451,10 @@ impl Engine {
             Vec::new()
         };
         let change = self.catalog.sync(instruments)?;
+        if let Some(records) = retained {
+            self.install_retained(records);
+        }
+        self.evidence.catalog_loaded.store(true, Ordering::Release);
         for slot in removed {
             slot.tracking_generation.fetch_add(1, Ordering::Release);
         }

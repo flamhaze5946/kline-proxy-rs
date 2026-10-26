@@ -71,6 +71,8 @@ pub struct Config {
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EvidenceConfig {
+    #[serde(skip)]
+    pub runtime: std::sync::Arc<parking_lot::Mutex<crate::evidence_state::RetentionRuntime>>,
     /// Explicit milliseconds; the deployment default is 1440 minutes.
     pub ws_trust_window_ms: u64,
     #[serde(default = "fallback_budget_default")]
@@ -652,7 +654,7 @@ fn validate_guard(before: u64, after: u64, minimum: u64) -> Result<()> {
     );
     Ok(())
 }
-fn validate_symbol(value: &str) -> Result<()> {
+pub(crate) fn validate_symbol(value: &str) -> Result<()> {
     anyhow::ensure!(
         !value.is_empty()
             && value.len() <= 128
