@@ -123,7 +123,7 @@ impl Engine {
         let catalog_loaded = catalog.generation() > 0;
         let evidence = crate::evidence::EvidenceRuntime::default();
         if settings.evidence.is_some() {
-            evidence.publish_directory(&catalog);
+            evidence.publish_directory(&catalog, &mut evidence.catalog_writer.lock());
         }
         evidence
             .catalog_loaded
@@ -383,6 +383,7 @@ impl Engine {
             {
                 return Ok(Commit::default());
             }
+            let covered_before = series.covered_from();
             let previous = series.evidence_record(input.open_time());
             let incoming = crate::evidence::incoming_record(&input);
             let mut trimmed = false;
@@ -425,6 +426,14 @@ impl Engine {
             let mut result = series.commit_evidence(input, slot.is_trading())?;
             result.trimmed |= trimmed;
             result.evidence_changed |= filled || trimmed;
+            // Use the same clock floor as evidence windows, sampled after mutation.
+            let closed_row = incoming.open_time < self.bulk_now_ms().div_euclid(60_000) * 60_000
+                || incoming.state != kline_core::evidence::EvidenceState::Pending;
+            if result.evidence_changed
+                && (closed_row || filled || trimmed || covered_before != series.covered_from())
+            {
+                slot.closed_version.fetch_add(1, Ordering::Release); // closed: rows/coverage
+            }
             if series.covered_from().is_some() {
                 slot.populated.store(true, Ordering::Release);
             }
@@ -476,9 +485,30 @@ impl Engine {
         instruments: Vec<crate::Instrument>,
         retained: Option<Vec<crate::evidence_bulk::RetainedRecord>>,
     ) -> Result<crate::catalog::CatalogChange, String> {
-        let _writer = self
+        let mut writer = self
             .evidence_enabled()
             .then(|| self.evidence.catalog_writer.lock());
+        if self.evidence_enabled() {
+            let mut proposed = instruments.clone();
+            proposed.sort_by(|a, b| {
+                (a.market, a.interval, &a.symbol).cmp(&(b.market, b.interval, &b.symbol))
+            });
+            let retained_same = retained.as_ref().is_none_or(|records| {
+                let proposed: std::collections::BTreeMap<_, _> = records
+                    .iter()
+                    .map(|r| (r.symbol.clone(), r.clone()))
+                    .collect();
+                *self.evidence.retained.read() == proposed
+            });
+            if self.catalog.instruments() == proposed
+                && retained_same
+                && self.catalog.published_generation.load(Ordering::Acquire)
+                    == self.evidence.catalog_generation.load(Ordering::Acquire)
+            {
+                self.evidence.catalog_loaded.store(true, Ordering::Release);
+                return Ok(crate::catalog::CatalogChange::default());
+            }
+        }
         let _directory_write = self
             .evidence_enabled()
             .then(|| self.evidence.begin_directory_write());
@@ -488,7 +518,8 @@ impl Engine {
         }
         self.evidence.catalog_loaded.store(true, Ordering::Release);
         if self.evidence_enabled() {
-            self.evidence.publish_directory(&self.catalog);
+            self.evidence
+                .publish_directory(&self.catalog, writer.as_deref_mut().unwrap());
         }
         if change.changed {
             self.windows.resize(self.catalog.slots().len());

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64};
 
 #[derive(Clone, Debug)]
 pub struct EvidenceSettings {
@@ -40,11 +40,18 @@ pub struct EvidenceConflict {
     pub incoming: EvidenceRecord,
     pub trips_breaker: bool,
 }
+// Weak symbol epochs share the existing directory writer, including unknown symbols.
+// Cached/flight stamps keep their epochs alive; abandoned names can be reclaimed.
+pub(crate) type DirectoryVersions =
+    BTreeMap<(kline_core::Market, kline_core::Interval, String), std::sync::Weak<AtomicU64>>;
 #[derive(Default)]
 pub(crate) struct EvidenceRuntime {
-    pub(crate) catalog_writer: Mutex<()>,
+    pub(crate) catalog_writer: Mutex<DirectoryVersions>,
     pub(crate) directory_epoch: AtomicU64,
+    pub(crate) catalog_generation: AtomicU64,
     pub(crate) directory: ArcSwap<EvidenceDirectory>,
+    pub(crate) breaker_generation: AtomicU64,
+    pub(crate) last_conflict_ms: AtomicI64,
     pub(crate) retained: RwLock<BTreeMap<String, crate::evidence_bulk::RetainedRecord>>,
     pub(crate) retained_generation: AtomicU64,
     pub(crate) catalog_loaded: AtomicBool,
@@ -75,7 +82,7 @@ impl EvidenceRuntime {
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         DirectoryWrite(&self.directory_epoch)
     }
-    pub fn publish_directory(&self, catalog: &crate::Catalog) {
+    pub fn publish_directory(&self, catalog: &crate::Catalog, versions: &mut DirectoryVersions) {
         let retained = self.retained.read();
         let mut view = EvidenceDirectory {
             generation: catalog.generation(),
@@ -102,6 +109,18 @@ impl EvidenceRuntime {
                 identity,
             );
         }
+        let old = self.directory.load();
+        versions.retain(|key, version| {
+            let Some(version) = version.upgrade() else {
+                return false;
+            };
+            if old.entries.get(key) != view.entries.get(key) {
+                version.fetch_add(1, std::sync::atomic::Ordering::Release);
+            }
+            true
+        });
+        self.catalog_generation
+            .store(view.generation, std::sync::atomic::Ordering::Release);
         self.directory.store(Arc::new(view));
     }
 }
@@ -113,6 +132,14 @@ pub(crate) struct EvidenceRuntimeState {
     pub conflicts: VecDeque<EvidenceConflict>,
 }
 impl EvidenceRuntime {
+    fn publish_breaker(&self, state: &EvidenceRuntimeState) {
+        self.last_conflict_ms.store(
+            state.breaker.last_conflict_ms,
+            std::sync::atomic::Ordering::Release,
+        );
+        self.breaker_generation
+            .store(state.generation, std::sync::atomic::Ordering::Release);
+    }
     pub(crate) fn record(&self, conflict: EvidenceConflict) {
         let mut state = self.state.lock();
         state.breaker.revised_total = state.breaker.revised_total.saturating_add(1);
@@ -124,6 +151,7 @@ impl EvidenceRuntime {
             state.conflicts.pop_front();
         }
         state.conflicts.push_back(conflict);
+        self.publish_breaker(&state);
     }
 }
 impl crate::Engine {
@@ -139,6 +167,7 @@ impl crate::Engine {
         let mut state = self.evidence.state.lock();
         state.breaker = breaker;
         state.generation = state.generation.wrapping_add(1);
+        self.evidence.publish_breaker(&state);
     }
     pub fn breaker_snapshot(&self) -> (u64, BreakerState) {
         let state = self.evidence.state.lock();

@@ -585,4 +585,122 @@ mod fix2_tests {
         task.await.unwrap();
         server.abort();
     }
+    #[tokio::test]
+    async fn fix3_nontrading_history_relisted_during_http_cannot_confirm_readiness() {
+        struct Mock {
+            history: AtomicUsize,
+            engine: Arc<Engine>,
+        }
+        async fn handler(
+            State(s): State<Arc<Mock>>,
+            Query(q): Query<HashMap<String, String>>,
+        ) -> Json<serde_json::Value> {
+            if q["limit"] == "99" {
+                return Json(serde_json::json!([]));
+            }
+            assert!(
+                !s.engine.catalog.slot(0).is_trading(),
+                "History must dispatch while nontrading"
+            );
+            let generation = s.engine.catalog.slot(0).tracking_generation();
+            let mut definitions = s.engine.catalog.instruments();
+            definitions[0].trading = true;
+            s.engine.refresh_catalog(definitions).unwrap();
+            assert_eq!(s.engine.catalog.slot(0).tracking_generation(), generation);
+            s.history.fetch_add(1, Ordering::AcqRel);
+            Json(serde_json::json!([
+                binance_wire::DisplayBar(bar(B - 200 * MINUTE)),
+                binance_wire::DisplayBar(bar(B - 199 * MINUTE))
+            ]))
+        }
+        let clock = Arc::new(TestClock(AtomicI64::new(B + 1500)));
+        let e = engine(1, clock);
+        e.commit(
+            0,
+            Update {
+                bar: bar(B - 200 * MINUTE),
+                closed: false,
+                source: Source::Rest,
+                event_time: None,
+                sequence: 0,
+            },
+        )
+        .unwrap();
+        e.commit(
+            0,
+            Update {
+                bar: bar(B - MINUTE),
+                closed: true,
+                source: Source::Stream,
+                event_time: Some(B),
+                sequence: 1,
+            },
+        )
+        .unwrap();
+        for open in (B - 98 * MINUTE..B).step_by(60000) {
+            e.commit_evidence(0, EvidenceUpdate::Rest(bar(open)))
+                .unwrap();
+        }
+        assert!(e.catalog.slot(0).gap_generation() > 0);
+        let mut definitions = e.catalog.instruments();
+        definitions[0].trading = false;
+        e.refresh_catalog(definitions).unwrap();
+        let state = Arc::new(Mock {
+            history: AtomicUsize::new(0),
+            engine: e.clone(),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let app = Router::new()
+            .route("/fapi/v1/klines", get(handler))
+            .with_state(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let status = Arc::new(StreamStatus::default());
+        status.epoch.store(1, Ordering::Release);
+        let feed = Feed {
+            market: Market::Future,
+            status,
+            ids: Some(Arc::from([0])),
+        };
+        let epoch = feed.token();
+        assert_ne!(epoch, 0);
+        let health = Health::new(e.clone(), vec![feed], Arc::new(SyncedClock::new(0)), false);
+        let mut record = TaskRecord::new(B + 1500);
+        record.initialized = true;
+        record.observe(B + 1500, epoch, 241);
+        record.epoch = 0;
+        record.gap = 0;
+        let (stop, rx) = watch::channel(false);
+        let task = tokio::spawn(reconcile_state(
+            e.clone(),
+            RestApi::new_with_type(&url, &url, 6000, NumberType::String).unwrap(),
+            config(),
+            health.clone(),
+            rx,
+            Duration::from_millis(1),
+            vec![Some(record)],
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if state.history.load(Ordering::Acquire) > 0
+                    && e.catalog.slot(0).evidence_record(B - 200 * MINUTE).state
+                        == EvidenceState::RestFinal
+                    && health.detail.read()["rest_jobs"] == 0
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!health.series.load()[0].ready);
+        assert_eq!(health.series.load()[0].epoch, 0);
+        assert_eq!(health.series.load()[0].gap, 0);
+        let _ = stop.send(true);
+        task.await.unwrap();
+        server.abort();
+    }
 }

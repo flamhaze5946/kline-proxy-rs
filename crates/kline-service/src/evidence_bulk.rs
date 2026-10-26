@@ -157,15 +157,30 @@ pub(crate) struct EvidenceSelection {
     pub key: Key,
     pub symbols: std::sync::Arc<[String]>,
     pub identities: Vec<Option<crate::evidence::EvidenceIdentity>>,
+    pub directory_versions: Vec<(std::sync::Arc<std::sync::atomic::AtomicU64>, u64)>,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct EvidenceStamp {
     pub trusted: bool,
     pub breaker_generation: u64,
-    pub generations: Vec<(Option<i64>, u64, u64)>,
+    pub generations: Vec<EvidenceSeriesVersion>,
     pub selection: EvidenceSelection,
     pub observed_at: i64,
     pub valid_until: i64,
+}
+#[derive(Clone)]
+pub(crate) struct EvidenceSeriesVersion {
+    slot: std::sync::Arc<crate::catalog::Slot>,
+    closed: u64,
+    tracking: u64,
+}
+impl std::fmt::Debug for EvidenceSeriesVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("EvidenceSeriesVersion")
+            .field(&self.closed)
+            .field(&self.tracking)
+            .finish()
+    }
 }
 #[derive(Debug, thiserror::Error)]
 #[error("evidence symbol count exceeds directory capacity 100000")]
@@ -269,19 +284,51 @@ impl Engine {
                     .cloned()
             })
             .collect();
+        let directory_versions =
+            self.evidence_directory_versions(&symbols, key.market, key.interval);
         let selection = EvidenceSelection {
             key,
             symbols,
             identities,
+            directory_versions,
         };
         if !self.evidence_selection_current(&selection) {
             return Err(stale_evidence());
         }
         Ok(selection)
     }
+    fn evidence_directory_versions(
+        &self,
+        symbols: &[String],
+        market: kline_core::Market,
+        interval: kline_core::Interval,
+    ) -> Vec<(std::sync::Arc<std::sync::atomic::AtomicU64>, u64)> {
+        let mut versions = self.evidence.catalog_writer.lock();
+        versions.retain(|_, v| v.strong_count() > 0);
+        symbols
+            .iter()
+            .map(|symbol| {
+                let weak = versions
+                    .entry((market, interval, symbol.clone()))
+                    .or_default();
+                let version = weak.upgrade().unwrap_or_else(|| {
+                    let version = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                    *weak = std::sync::Arc::downgrade(&version);
+                    version
+                });
+                let value = version.load(Ordering::Acquire);
+                (version, value)
+            })
+            .collect()
+    }
     pub(crate) fn evidence_selection_current(&self, selection: &EvidenceSelection) -> bool {
         let epoch = self.evidence.directory_epoch.load(Ordering::Acquire);
-        if !epoch.is_multiple_of(2) {
+        if !epoch.is_multiple_of(2)
+            || selection
+                .directory_versions
+                .iter()
+                .any(|(v, expected)| v.load(Ordering::Acquire) != *expected)
+        {
             return false;
         }
         let view = self.evidence.directory.load_full();
@@ -346,10 +393,20 @@ impl Engine {
         }
     }
     pub fn restore_retained(&self, records: Vec<RetainedRecord>) {
-        let _writer = self.evidence.catalog_writer.lock();
+        let mut writer = self.evidence.catalog_writer.lock();
+        let proposed: BTreeMap<_, _> = records
+            .iter()
+            .map(|r| (r.symbol.clone(), r.clone()))
+            .collect();
+        if *self.evidence.retained.read() == proposed
+            && self.catalog.published_generation.load(Ordering::Acquire)
+                == self.evidence.catalog_generation.load(Ordering::Acquire)
+        {
+            return;
+        }
         let _write = self.evidence.begin_directory_write();
         self.install_retained(records);
-        self.evidence.publish_directory(&self.catalog);
+        self.evidence.publish_directory(&self.catalog, &mut writer);
     }
     pub fn evidence_catalog_loaded(&self) -> bool {
         self.evidence.catalog_loaded.load(Ordering::Acquire)
@@ -360,50 +417,41 @@ impl Engine {
         stamp: &EvidenceStamp,
         now: i64,
     ) -> bool {
-        // This path never waits for a directory writer, series writer or breaker writer.
+        // The stamp owns the series and symbol-epoch atomics. Do not look up rows,
+        // directory views, or any lock here, even with a nonblocking try operation.
         let _ = now;
-        let Some(state) = self.evidence.state.try_lock() else {
-            return false;
-        };
-        let generation = state.generation;
-        let breaker = state.breaker;
-        drop(state);
-        if generation != stamp.breaker_generation
-            || !self.evidence_selection_current(&stamp.selection)
+        let epoch = self.evidence.directory_epoch.load(Ordering::Acquire);
+        if !epoch.is_multiple_of(2)
+            || self.catalog.published_generation.load(Ordering::Acquire)
+                != self.evidence.catalog_generation.load(Ordering::Acquire)
+            || self.evidence.breaker_generation.load(Ordering::Acquire) != stamp.breaker_generation
+            || stamp
+                .selection
+                .directory_versions
+                .iter()
+                .any(|(version, expected)| version.load(Ordering::Acquire) != *expected)
+            || key.ids.len() != stamp.generations.len()
+            || stamp.generations.iter().any(|version| {
+                version.slot.closed_version.load(Ordering::Acquire) != version.closed
+                    || version.slot.tracking_generation.load(Ordering::Acquire) != version.tracking
+            })
         {
             return false;
         }
-        if key.ids.len() != stamp.generations.len() {
+        let last_conflict_ms = self.evidence.last_conflict_ms.load(Ordering::Acquire);
+        if self.evidence.directory_epoch.load(Ordering::Acquire) != epoch
+            || self.evidence.breaker_generation.load(Ordering::Acquire) != stamp.breaker_generation
+        {
             return false;
         }
-        for (&id, &expected) in key.ids.iter().zip(&stamp.generations) {
-            let slot = self.catalog.slot(id);
-            let Some(series) = slot.state.try_read() else {
-                return false;
-            };
-            if series.evidence_window_stamp(
-                key.boundary - key.limit as i64 * 60_000,
-                key.boundary - 60_000,
-            ) != expected
-            {
-                return false;
-            }
-        }
-        if !self.evidence_selection_current(&stamp.selection) {
-            return false;
-        }
-        let Some(state) = self.evidence.state.try_lock() else {
-            return false;
-        };
-        if state.generation != generation {
-            return false;
-        }
-        drop(state);
-        // Re-sample after every potentially contended read and all comparisons.
         let now = self.bulk_now_ms().max(key.boundary);
         now >= stamp.observed_at
             && now < stamp.valid_until
-            && breaker.ws_final_trusted(
+            && crate::evidence::BreakerState {
+                last_conflict_ms,
+                revised_total: 0,
+            }
+            .ws_final_trusted(
                 self.now_ms(),
                 self.settings.evidence.as_ref().unwrap().ws_trust_window_ms,
             ) == stamp.trusted
@@ -429,6 +477,7 @@ impl Engine {
         let selection = EvidenceSelection {
             key: key.clone(),
             symbols: symbols.to_vec().into(),
+            directory_versions: self.evidence_directory_versions(symbols, key.market, key.interval),
             identities: symbols
                 .iter()
                 .map(|symbol| {
@@ -473,7 +522,11 @@ impl Engine {
         if key.interval.boundary(now) != key.boundary {
             return Err(stale_evidence());
         }
-        let (breaker_generation, breaker) = self.breaker_snapshot();
+        let (snapshot_generation, breaker) = self.breaker_snapshot();
+        let breaker_generation = self.evidence.breaker_generation.load(Ordering::Acquire);
+        if snapshot_generation != breaker_generation {
+            return Err(stale_evidence());
+        }
         let trusted = breaker.ws_final_trusted(
             self.now_ms(),
             self.settings.evidence.as_ref().unwrap().ws_trust_window_ms,
@@ -499,12 +552,20 @@ impl Engine {
             covered_from: BTreeMap::new(),
         };
         let mut finalized = true;
-        let mut generations = Vec::new();
-        for &id in key.ids.iter() {
-            generations.push(self.catalog.slot(id).select_bars(|series| {
-                series.evidence_window_stamp(response.window.first_open, response.window.last_open)
-            }));
-        }
+        let generations = key
+            .ids
+            .iter()
+            .map(|&id| {
+                let slot = self.catalog.slot(id);
+                let closed = slot.closed_version.load(Ordering::Acquire);
+                let tracking = slot.tracking_generation.load(Ordering::Acquire);
+                EvidenceSeriesVersion {
+                    slot,
+                    closed,
+                    tracking,
+                }
+            })
+            .collect();
         after_stamps();
         for (symbol, identity) in symbols.iter().zip(&selection.identities) {
             let mut rows = Vec::new();
@@ -596,7 +657,8 @@ impl Engine {
                 .unwrap_or(i64::MAX)
                 .min(key.boundary + 60_000),
         };
-        if self.bulk_now_ms().max(key.boundary) >= stamp.valid_until {
+        // Acquire the same published versions again after every row and encoding step.
+        if !self.evidence_reply_current(key, &stamp, self.bulk_now_ms()) {
             return Err(stale_evidence());
         }
         self.metrics.responses_built.fetch_add(1, Ordering::Relaxed);
@@ -1293,5 +1355,338 @@ mod flight_tests {
                 .len(),
             1
         );
+    }
+    #[test]
+    fn fix3_forming_writer_holds_all_locks_but_atomic_recheck_still_passes() {
+        let (e, _, key, symbols) = setup();
+        e.commit(0, update(300000, "1", Source::Stream)).unwrap();
+        let reply = e.build_evidence_body(&key, &symbols, 0).unwrap();
+        let slot = e.catalog.slot(0);
+        let before = slot.closed_version.load(Ordering::Acquire);
+        let writer = e.evidence.catalog_writer.lock();
+        let lifecycle = slot.evidence_lifecycle.lock();
+        let retained = e.evidence.retained.write();
+        let breaker = e.evidence.state.lock();
+        let mut series = slot.state.write();
+        series
+            .commit_evidence(
+                kline_core::evidence::EvidenceUpdate::Observation(update(
+                    300000,
+                    "2",
+                    Source::Stream,
+                )),
+                true,
+            )
+            .unwrap();
+        assert_eq!(slot.closed_version.load(Ordering::Acquire), before);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = {
+            let e = e.clone();
+            let key = key.clone();
+            std::thread::spawn(move || {
+                tx.send(e.reply_current(&key, &reply, e.bulk_now_ms()))
+                    .unwrap()
+            })
+        };
+        let result = rx.recv_timeout(std::time::Duration::from_secs(1));
+        drop(series);
+        drop(breaker);
+        drop(retained);
+        drop(lifecycle);
+        drop(writer);
+        worker.join().unwrap();
+        assert!(result.expect("recheck acquired a lock"));
+    }
+    #[test]
+    fn fix3_recheck_source_contains_only_atomic_reads_and_clock_reads() {
+        let source = include_str!("evidence_bulk.rs");
+        let body = source
+            .split("pub(crate) fn evidence_reply_current(")
+            .nth(1)
+            .unwrap()
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        for forbidden in [
+            ".lock(",
+            ".read(",
+            ".write(",
+            "try_lock",
+            "try_read",
+            "try_write",
+            "self.catalog.slot(",
+            "self.catalog.generation(",
+            "evidence_selection_current",
+            "breaker_snapshot",
+            "breaker_state",
+            "ws_final_trusted()",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "recheck must remain purely atomic: {forbidden}"
+            );
+        }
+    }
+    #[test]
+    fn fix3_closed_state_values_coverage_and_old_history_invalidate_versions() {
+        use kline_core::evidence::EvidenceUpdate;
+        for open in (0..300000).step_by(60000) {
+            let (e, _, key, symbols) = setup();
+            e.commit(0, update(open, "1", Source::Rest)).unwrap();
+            let reply = e.build_evidence_body(&key, &symbols, 0).unwrap();
+            let slot = e.catalog.slot(0);
+            let before = slot.closed_version.load(Ordering::Acquire);
+            e.commit_evidence(0, EvidenceUpdate::Rest(update(open, "2", Source::Rest).bar))
+                .unwrap();
+            assert!(
+                slot.closed_version.load(Ordering::Acquire) > before,
+                "closed row {open}"
+            );
+            assert!(!e.reply_current(&key, &reply, e.bulk_now_ms()));
+        }
+        for operation in ["P-bytes", "A", "W-to-P", "coverage", "forming-trim"] {
+            let (e, _, key, symbols) = setup();
+            e.commit(0, update(180000, "1", Source::Rest)).unwrap();
+            let reply = e.build_evidence_body(&key, &symbols, 0).unwrap();
+            let slot = e.catalog.slot(0);
+            let before = slot.closed_version.load(Ordering::Acquire);
+            match operation {
+                "P-bytes" => {
+                    e.commit(0, update(180000, "2", Source::Rest)).unwrap();
+                }
+                "A" => {
+                    e.commit_evidence(0, EvidenceUpdate::Absent(180000))
+                        .unwrap();
+                }
+                "W-to-P" => {
+                    let mut u = update(240000, "2", Source::Stream);
+                    u.closed = true;
+                    e.commit(0, u).unwrap();
+                }
+                "coverage" => {
+                    e.commit(0, update(120000, "1", Source::Rest)).unwrap();
+                }
+                "forming-trim" => {
+                    let mut u = update(300000 + 241 * 60000, "1", Source::Stream);
+                    u.closed = false;
+                    e.commit(0, u).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                slot.closed_version.load(Ordering::Acquire) > before,
+                "{operation}"
+            );
+            assert!(
+                !e.reply_current(&key, &reply, e.bulk_now_ms()),
+                "{operation}"
+            );
+        }
+        let (e, _, mut key, symbols) = setup();
+        key.limit = 1;
+        e.commit(0, update(0, "1", Source::Rest)).unwrap();
+        let reply = e.build_evidence_body(&key, &symbols, 0).unwrap();
+        e.commit(0, update(0, "2", Source::Rest)).unwrap();
+        assert!(
+            !e.reply_current(&key, &reply, e.bulk_now_ms()),
+            "old history invalidation is permitted"
+        );
+    }
+    #[test]
+    fn fix3_resize_and_clear_publish_closed_epoch_versions_under_series_lock() {
+        for clear in [false, true] {
+            let (e, _, key, symbols) = setup();
+            let reply = e.build_evidence_body(&key, &symbols, 0).unwrap();
+            let slot = e.catalog.slot(0);
+            let before = slot.closed_version.load(Ordering::Acquire);
+            let mut definitions = e.catalog.instruments();
+            if clear {
+                definitions.clear();
+            } else {
+                definitions[0].capacity = NonZeroUsize::new(240).unwrap();
+            }
+            e.refresh_catalog(definitions).unwrap();
+            assert!(
+                slot.closed_version.load(Ordering::Acquire) > before,
+                "clear={clear}"
+            );
+            assert!(!e.reply_current(&key, &reply, e.bulk_now_ms()));
+        }
+    }
+    #[test]
+    fn fix3_builder_rechecks_atomic_versions_after_reading_rows() {
+        let (e, _, key, symbols) = setup();
+        let result = e.build_evidence_snapshot(&key, &symbols, 0, || {
+            e.commit_evidence(
+                0,
+                kline_core::evidence::EvidenceUpdate::Rest(update(240000, "1", Source::Rest).bar),
+            )
+            .unwrap();
+        });
+        assert!(is_stale_evidence(&result.unwrap_err()));
+    }
+    #[test]
+    fn fix3_directory_trust_breaker_and_unknown_identity_changes_invalidate() {
+        for change in ["directory", "trust", "breaker"] {
+            let (e, _, key, symbols) = setup();
+            let reply = e.build_evidence_body(&key, &symbols, 0).unwrap();
+            match change {
+                "directory" => {
+                    let mut defs = e.catalog.instruments();
+                    defs[0].trading = false;
+                    e.refresh_catalog(defs).unwrap();
+                }
+                "trust" => e.restore_breaker(BreakerState {
+                    last_conflict_ms: 300500,
+                    revised_total: 0,
+                }),
+                "breaker" => e.restore_breaker(BreakerState {
+                    last_conflict_ms: 0,
+                    revised_total: 1,
+                }),
+                _ => unreachable!(),
+            }
+            assert!(!e.reply_current(&key, &reply, e.bulk_now_ms()), "{change}");
+        }
+        let (e, _, key, symbols) = setup();
+        let reply = e.build_evidence_body(&key, &symbols, 0).unwrap();
+        let mut definitions = e.catalog.instruments();
+        definitions[0].trading = false;
+        e.catalog.sync(definitions).unwrap();
+        assert!(
+            !e.reply_current(&key, &reply, e.bulk_now_ms()),
+            "unpublished direct Catalog::sync"
+        );
+        let (e, _, key, _) = setup();
+        let selection = e
+            .select_evidence(&query(&["NEWUSDT"], 1), key.interval, e.bulk_now_ms())
+            .unwrap();
+        let reply = e.build_evidence_selected(&selection, 0).unwrap();
+        let mut defs = e.catalog.instruments();
+        let mut new = defs[0].clone();
+        new.symbol = "NEWUSDT".into();
+        new.continuous = None;
+        defs.push(new);
+        e.refresh_catalog(defs).unwrap();
+        assert!(!e.reply_current(&selection.key, &reply, e.bulk_now_ms()));
+    }
+    #[test]
+    fn fix3_unchanged_refresh_preserves_directory_epoch_and_published_view() {
+        let (e, _, key, symbols) = setup();
+        let reply = e.build_evidence_body(&key, &symbols, 0).unwrap();
+        let epoch = e.evidence.directory_epoch.load(Ordering::Acquire);
+        let view = e.evidence.directory.load_full();
+        let records = e.retained_records();
+        for _ in 0..4 {
+            let mut definitions = e.catalog.instruments();
+            definitions.reverse();
+            assert!(
+                !e.refresh_catalog_with_retained(definitions, records.clone())
+                    .unwrap()
+                    .changed
+            );
+            assert_eq!(e.evidence.directory_epoch.load(Ordering::Acquire), epoch);
+            assert!(Arc::ptr_eq(&view, &e.evidence.directory.load_full()));
+            assert!(e.reply_current(&key, &reply, e.bulk_now_ms()));
+        }
+    }
+    #[test]
+    fn fix3_actual_withdrawal_lock_contends_after_first_page_row() {
+        let (e, _, _, _) = setup();
+        let mut first = update(180000, "1", Source::Stream);
+        first.closed = true;
+        e.commit(0, first).unwrap();
+        let updates = vec![
+            kline_core::evidence::EvidenceUpdate::Rest(update(180000, "2", Source::Rest).bar),
+            kline_core::evidence::EvidenceUpdate::Rest(update(240000, "2", Source::Rest).bar),
+        ];
+        let (tx, rx) = std::sync::mpsc::channel();
+        *e.catalog.withdrawal_lock_probe.lock() = Some(Arc::new(move |contended| {
+            let _ = tx.send(contended);
+        }));
+        let mut withdrawal = None;
+        let result = e.commit_evidence_page_with(0, 0, updates, |index| {
+            if index == 0 {
+                withdrawal = Some({
+                    let e = e.clone();
+                    std::thread::spawn(move || e.refresh_catalog(vec![]).unwrap())
+                });
+                let contended = rx.recv_timeout(std::time::Duration::from_secs(1));
+                assert!(
+                    contended.unwrap(),
+                    "actual withdrawal must compete for the page lock"
+                );
+                assert!(e.catalog.slot(0).is_tracked());
+            }
+        });
+        assert!(result.unwrap());
+        withdrawal.unwrap().join().unwrap();
+        assert_eq!(e.breaker_state().revised_total, 2);
+        assert!(!e.catalog.slot(0).is_tracked());
+    }
+    #[test]
+    fn fix3_late_ws_challenges_publish_breaker_version_without_closed_row_changes() {
+        use kline_core::evidence::EvidenceUpdate;
+        for absent in [false, true] {
+            let (e, _, key, symbols) = setup();
+            e.commit_evidence(
+                0,
+                if absent {
+                    EvidenceUpdate::Absent(240000)
+                } else {
+                    EvidenceUpdate::Rest(update(240000, "1", Source::Rest).bar)
+                },
+            )
+            .unwrap();
+            let reply = e.build_evidence_body(&key, &symbols, 0).unwrap();
+            let slot = e.catalog.slot(0);
+            let closed = slot.closed_version.load(Ordering::Acquire);
+            let generation = e.evidence.breaker_generation.load(Ordering::Acquire);
+            let mut late = update(240000, "2", Source::Stream);
+            late.closed = true;
+            e.commit(0, late).unwrap();
+            assert_eq!(slot.closed_version.load(Ordering::Acquire), closed);
+            assert_eq!(
+                e.evidence.breaker_generation.load(Ordering::Acquire),
+                generation + 1
+            );
+            assert_eq!(
+                e.evidence.breaker_generation.load(Ordering::Acquire),
+                e.breaker_snapshot().0
+            );
+            assert!(!e.reply_current(&key, &reply, e.bulk_now_ms()));
+        }
+    }
+    #[test]
+    fn fix3_closed_version_uses_the_same_host_clock_floor_as_response_windows() {
+        struct SkewClock;
+        impl Clock for SkewClock {
+            fn now_ms(&self) -> i64 {
+                299500
+            }
+            fn host_ms(&self) -> i64 {
+                300500
+            }
+        }
+        let (source, _, _, _) = setup();
+        let e = Engine::new(
+            Catalog::new(source.catalog.instruments()).unwrap(),
+            Arc::new(SkewClock),
+            source.settings().clone(),
+        );
+        e.commit(0, update(240000, "1", Source::Stream)).unwrap();
+        let selection = e
+            .select_evidence(
+                &query(&["BTCUSDT"], 1),
+                Interval::parse("1m").unwrap(),
+                e.bulk_now_ms(),
+            )
+            .unwrap();
+        assert_eq!(selection.key.boundary, 300000);
+        let reply = e.build_evidence_selected(&selection, 0).unwrap();
+        let before = e.catalog.slot(0).closed_version.load(Ordering::Acquire);
+        e.commit(0, update(240000, "2", Source::Stream)).unwrap();
+        assert!(e.catalog.slot(0).closed_version.load(Ordering::Acquire) > before);
+        assert!(!e.reply_current(&selection.key, &reply, e.bulk_now_ms()));
     }
 }
