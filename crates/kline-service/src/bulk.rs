@@ -199,6 +199,9 @@ impl Engine {
         } else {
             None
         };
+        if with_evidence && let Some(boundary) = not_before {
+            self.expose_evidence_boundary(boundary);
+        }
         // A slot granted after queueing is carried into the next lookup; waiting for it does not
         // use up one of the attempts that guard against replies going stale under races. One
         // deadline bounds all of this request's admission waits, however many lookups it takes.

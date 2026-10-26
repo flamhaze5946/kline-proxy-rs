@@ -152,12 +152,13 @@ impl EvidenceResponse {
         Ok(())
     }
 }
+type DirectoryVersion = (std::sync::Arc<std::sync::atomic::AtomicU64>, u64);
 #[derive(Clone, Debug)]
 pub(crate) struct EvidenceSelection {
     pub key: Key,
     pub symbols: std::sync::Arc<[String]>,
     pub identities: Vec<Option<crate::evidence::EvidenceIdentity>>,
-    pub directory_versions: Vec<(std::sync::Arc<std::sync::atomic::AtomicU64>, u64)>,
+    pub directory_versions: Vec<DirectoryVersion>,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct EvidenceStamp {
@@ -198,6 +199,11 @@ pub(crate) fn is_stale_evidence(error: &ServiceError) -> bool {
     matches!(error, ServiceError::Worker(e) if e.is::<StaleEvidence>())
 }
 impl Engine {
+    pub(crate) fn expose_evidence_boundary(&self, boundary: i64) {
+        self.evidence
+            .exposed_boundary
+            .fetch_max(boundary, Ordering::Release);
+    }
     #[cfg(test)]
     pub(crate) fn evidence_key(
         &self,
@@ -239,6 +245,8 @@ impl Engine {
             .collect::<Vec<_>>()
             .into();
         after_ids();
+        let boundary = interval.boundary(self.bulk_now_ms().max(now));
+        self.expose_evidence_boundary(boundary);
         (
             Key {
                 market: query.market,
@@ -246,7 +254,7 @@ impl Engine {
                 limit: query.limit.unwrap_or(5).clamp(1, 100) as usize,
                 closed_only: true,
                 ids,
-                boundary: interval.boundary(self.bulk_now_ms().max(now)),
+                boundary,
                 revision: self.catalog.generation(),
             },
             symbols.into(),
@@ -285,7 +293,7 @@ impl Engine {
             })
             .collect();
         let directory_versions =
-            self.evidence_directory_versions(&symbols, key.market, key.interval);
+            self.evidence_directory_versions(&symbols, key.market, key.interval)?;
         let selection = EvidenceSelection {
             key,
             symbols,
@@ -302,24 +310,40 @@ impl Engine {
         symbols: &[String],
         market: kline_core::Market,
         interval: kline_core::Interval,
-    ) -> Vec<(std::sync::Arc<std::sync::atomic::AtomicU64>, u64)> {
-        let mut versions = self.evidence.catalog_writer.lock();
-        versions.retain(|_, v| v.strong_count() > 0);
-        symbols
+    ) -> Result<Vec<DirectoryVersion>, ServiceError> {
+        // Classify and clone keys outside the writer. Selection validation detects
+        // a publication between this view and the version capture below.
+        let view = self.evidence.directory.load_full();
+        let known = symbols
             .iter()
-            .map(|symbol| {
-                let weak = versions
-                    .entry((market, interval, symbol.clone()))
-                    .or_default();
-                let version = weak.upgrade().unwrap_or_else(|| {
-                    let version = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-                    *weak = std::sync::Arc::downgrade(&version);
-                    version
-                });
-                let value = version.load(Ordering::Acquire);
-                (version, value)
-            })
-            .collect()
+            .map(|symbol| (market, interval, symbol.clone()))
+            .filter(|key| view.entries.contains_key(key))
+            .collect::<Vec<_>>();
+        let has_unknown = known.len() != symbols.len();
+        let mut result = Vec::with_capacity(known.len() + usize::from(has_unknown));
+        let mut versions = self.evidence.catalog_writer.lock();
+        if self.catalog.published_generation.load(Ordering::Acquire) != view.generation {
+            return Err(stale_evidence());
+        }
+        for key in known {
+            if !versions.contains_key(&key) && versions.len() >= crate::catalog::MAX_SERIES {
+                return Err(stale_evidence());
+            }
+            let weak = versions.entry(key).or_default();
+            let version = weak.upgrade().unwrap_or_else(|| {
+                let version = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+                *weak = std::sync::Arc::downgrade(&version);
+                version
+            });
+            let value = version.load(Ordering::Acquire);
+            result.push((version, value));
+        }
+        if has_unknown {
+            let version = self.evidence.membership_version.clone();
+            let value = version.load(Ordering::Acquire);
+            result.push((version, value));
+        }
+        Ok(result)
     }
     pub(crate) fn evidence_selection_current(&self, selection: &EvidenceSelection) -> bool {
         let epoch = self.evidence.directory_epoch.load(Ordering::Acquire);
@@ -477,7 +501,11 @@ impl Engine {
         let selection = EvidenceSelection {
             key: key.clone(),
             symbols: symbols.to_vec().into(),
-            directory_versions: self.evidence_directory_versions(symbols, key.market, key.interval),
+            directory_versions: self.evidence_directory_versions(
+                symbols,
+                key.market,
+                key.interval,
+            )?,
             identities: symbols
                 .iter()
                 .map(|symbol| {
@@ -522,6 +550,7 @@ impl Engine {
         if key.interval.boundary(now) != key.boundary {
             return Err(stale_evidence());
         }
+        self.expose_evidence_boundary(key.boundary);
         let (snapshot_generation, breaker) = self.breaker_snapshot();
         let breaker_generation = self.evidence.breaker_generation.load(Ordering::Acquire);
         if snapshot_generation != breaker_generation {
@@ -1363,22 +1392,13 @@ mod flight_tests {
         let reply = e.build_evidence_body(&key, &symbols, 0).unwrap();
         let slot = e.catalog.slot(0);
         let before = slot.closed_version.load(Ordering::Acquire);
+        e.commit(0, update(300000, "2", Source::Stream)).unwrap();
+        assert_eq!(slot.closed_version.load(Ordering::Acquire), before);
         let writer = e.evidence.catalog_writer.lock();
         let lifecycle = slot.evidence_lifecycle.lock();
         let retained = e.evidence.retained.write();
         let breaker = e.evidence.state.lock();
-        let mut series = slot.state.write();
-        series
-            .commit_evidence(
-                kline_core::evidence::EvidenceUpdate::Observation(update(
-                    300000,
-                    "2",
-                    Source::Stream,
-                )),
-                true,
-            )
-            .unwrap();
-        assert_eq!(slot.closed_version.load(Ordering::Acquire), before);
+        let series = slot.state.write();
         let (tx, rx) = std::sync::mpsc::channel();
         let worker = {
             let e = e.clone();
@@ -1688,5 +1708,203 @@ mod flight_tests {
         e.commit(0, update(240000, "2", Source::Stream)).unwrap();
         assert!(e.catalog.slot(0).closed_version.load(Ordering::Acquire) > before);
         assert!(!e.reply_current(&selection.key, &reply, e.bulk_now_ms()));
+    }
+    fn fix4_pending_setup(now: i64) -> (Arc<Engine>, Arc<TestClock>, Key, Arc<[String]>) {
+        let (source, clock, key, symbols) = setup();
+        clock.0.store(now, Ordering::Release);
+        let e = Engine::new(
+            Catalog::new(source.catalog.instruments()).unwrap(),
+            clock.clone(),
+            source.settings().clone(),
+        );
+        e.commit(0, update(240000, "1", Source::Stream)).unwrap();
+        (e, clock, key, symbols)
+    }
+    #[test]
+    fn fix4_pending_rewrite_after_clock_rollback_invalidates_exposed_window() {
+        let (e, clock, key, symbols) = fix4_pending_setup(300005);
+        let reply = e.build_evidence_body(&key, &symbols, 0).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(body["klines"]["BTCUSDT"][0][1], "1");
+        assert_eq!(body["evidence"]["BTCUSDT"][0], "pending");
+        let slot = e.catalog.slot(0);
+        let before = slot.closed_version.load(Ordering::Acquire);
+        // Cross backwards into the row's own minute, outside the pre-wait margin.
+        clock.0.store(299700, Ordering::Release);
+        e.commit(0, update(240000, "2", Source::Stream)).unwrap();
+        assert!(slot.closed_version.load(Ordering::Acquire) > before);
+        clock.0.store(300006, Ordering::Release);
+        assert!(!e.reply_current(&key, &reply, e.bulk_now_ms()));
+        let fresh = e.build_evidence_body(&key, &symbols, 0).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&fresh.body).unwrap();
+        assert_eq!(body["klines"]["BTCUSDT"][0][1], "2");
+        assert_eq!(body["evidence"]["BTCUSDT"][0], "pending");
+    }
+    #[test]
+    fn fix4_selection_and_build_publish_monotonic_not_before_boundaries() {
+        for selecting in [false, true] {
+            let (e, clock, mut key, symbols) = fix4_pending_setup(299000);
+            assert_eq!(e.evidence.exposed_boundary.load(Ordering::Acquire), 0);
+            key.boundary = 360000;
+            let reply = if selecting {
+                let selection = e
+                    .select_evidence(&query(&["BTCUSDT"], 5), key.interval, 360000)
+                    .unwrap();
+                assert_eq!(selection.key.boundary, 360000);
+                assert_eq!(e.evidence.exposed_boundary.load(Ordering::Acquire), 360000);
+                e.build_evidence_selected(&selection, 0).unwrap()
+            } else {
+                e.build_evidence_body(&key, &symbols, 0).unwrap()
+            };
+            assert_eq!(e.evidence.exposed_boundary.load(Ordering::Acquire), 360000);
+            let earlier = e
+                .select_evidence(&query(&["BTCUSDT"], 5), key.interval, 300000)
+                .unwrap();
+            assert_eq!(earlier.key.boundary, 300000);
+            e.build_evidence_selected(&earlier, 0).unwrap();
+            assert_eq!(e.evidence.exposed_boundary.load(Ordering::Acquire), 360000);
+            clock.0.store(239700, Ordering::Release);
+            let before = e.catalog.slot(0).closed_version.load(Ordering::Acquire);
+            e.commit(0, update(240000, "2", Source::Stream)).unwrap();
+            assert!(e.catalog.slot(0).closed_version.load(Ordering::Acquire) > before);
+            clock.0.store(360006, Ordering::Release);
+            assert!(!e.reply_current(&key, &reply, e.bulk_now_ms()));
+        }
+    }
+    #[test]
+    fn fix4_pre_boundary_margin_classifies_pending_updates_before_any_exposure() {
+        let (e, _, _, _) = fix4_pending_setup(299800);
+        assert_eq!(e.evidence.exposed_boundary.load(Ordering::Acquire), 0);
+        let before = e.catalog.slot(0).closed_version.load(Ordering::Acquire);
+        e.commit(0, update(240000, "2", Source::Stream)).unwrap();
+        assert!(e.catalog.slot(0).closed_version.load(Ordering::Acquire) > before);
+    }
+    #[test]
+    fn fix4_unknown_symbols_share_membership_version_without_registering_names() {
+        let (e, _, key, _) = setup();
+        let mut request = query(&[], 1);
+        request.symbols = (0..crate::catalog::MAX_SERIES)
+            .map(|i| format!("UNKNOWN-{i}"))
+            .collect();
+        let many = e
+            .select_evidence(&request, key.interval, e.bulk_now_ms())
+            .unwrap();
+        assert_eq!(many.identities.len(), crate::catalog::MAX_SERIES);
+        assert!(many.identities.iter().all(Option::is_none));
+        assert_eq!(many.directory_versions.len(), 1);
+        assert!(Arc::ptr_eq(
+            &many.directory_versions[0].0,
+            &e.evidence.membership_version
+        ));
+        assert!(e.evidence.catalog_writer.lock().is_empty());
+        let other = e
+            .select_evidence(
+                &query(&["ANOTHER-UNKNOWN"], 1),
+                key.interval,
+                e.bulk_now_ms(),
+            )
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            &many.directory_versions[0].0,
+            &other.directory_versions[0].0
+        ));
+        assert!(e.evidence.catalog_writer.lock().is_empty());
+    }
+    #[test]
+    fn fix4_dead_symbol_versions_are_cleaned_only_when_directory_is_published() {
+        let (e, _, key, _) = setup();
+        let known = e
+            .select_evidence(&query(&["BTCUSDT"], 1), key.interval, e.bulk_now_ms())
+            .unwrap();
+        assert_eq!(e.evidence.catalog_writer.lock().len(), 1);
+        drop(known);
+        let unknown = e
+            .select_evidence(&query(&["UNKNOWN"], 1), key.interval, e.bulk_now_ms())
+            .unwrap();
+        assert_eq!(
+            e.evidence.catalog_writer.lock().len(),
+            1,
+            "selection must not scan or collect dead versions"
+        );
+        assert_eq!(
+            e.evidence
+                .catalog_writer
+                .lock()
+                .values()
+                .next()
+                .unwrap()
+                .strong_count(),
+            0
+        );
+        let reply = e.build_evidence_selected(&unknown, 0).unwrap();
+        assert_eq!(e.evidence.catalog_writer.lock().len(), 1);
+        let membership = e.evidence.membership_version.load(Ordering::Acquire);
+        let mut definitions = e.catalog.instruments();
+        definitions[0].trading = false;
+        e.refresh_catalog(definitions.clone()).unwrap();
+        assert!(e.evidence.catalog_writer.lock().is_empty());
+        assert_eq!(
+            e.evidence.membership_version.load(Ordering::Acquire),
+            membership
+        );
+        assert!(e.reply_current(&unknown.key, &reply, e.bulk_now_ms()));
+        let mut new = definitions[0].clone();
+        new.symbol = "NEWUSDT".into();
+        new.continuous = None;
+        definitions.push(new);
+        e.refresh_catalog(definitions.clone()).unwrap();
+        assert!(e.evidence.membership_version.load(Ordering::Acquire) > membership);
+        assert!(!e.reply_current(&unknown.key, &reply, e.bulk_now_ms()));
+        let unknown = e
+            .select_evidence(&query(&["UNKNOWN"], 1), key.interval, e.bulk_now_ms())
+            .unwrap();
+        let reply = e.build_evidence_selected(&unknown, 0).unwrap();
+        definitions.pop();
+        e.refresh_catalog(definitions).unwrap();
+        assert!(
+            !e.reply_current(&unknown.key, &reply, e.bulk_now_ms()),
+            "removal is also a membership change"
+        );
+    }
+    #[test]
+    fn fix4_symbol_version_table_has_a_hard_directory_capacity_bound() {
+        let (e, _, key, _) = setup();
+        {
+            let mut versions = e.evidence.catalog_writer.lock();
+            for i in 0..crate::catalog::MAX_SERIES {
+                versions.insert(
+                    (key.market, key.interval, format!("expired-fixture-{i}")),
+                    std::sync::Weak::new(),
+                );
+            }
+        }
+        let before = (
+            e.cache_sizes(),
+            e.metrics.responses_built.load(Ordering::Acquire),
+        );
+        let error = e
+            .select_evidence(&query(&["BTCUSDT"], 1), key.interval, e.bulk_now_ms())
+            .unwrap_err();
+        assert!(is_stale_evidence(&error));
+        assert_eq!(
+            e.evidence.catalog_writer.lock().len(),
+            crate::catalog::MAX_SERIES
+        );
+        assert_eq!(
+            (
+                e.cache_sizes(),
+                e.metrics.responses_built.load(Ordering::Acquire)
+            ),
+            before
+        );
+        let mut definitions = e.catalog.instruments();
+        definitions[0].trading = false;
+        e.refresh_catalog(definitions).unwrap();
+        assert!(e.evidence.catalog_writer.lock().is_empty());
+        assert!(
+            e.select_evidence(&query(&["BTCUSDT"], 1), key.interval, e.bulk_now_ms())
+                .is_ok()
+        );
+        assert_eq!(e.evidence.catalog_writer.lock().len(), 1);
     }
 }

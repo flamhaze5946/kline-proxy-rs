@@ -40,13 +40,15 @@ pub struct EvidenceConflict {
     pub incoming: EvidenceRecord,
     pub trips_breaker: bool,
 }
-// Weak symbol epochs share the existing directory writer, including unknown symbols.
+// Known-symbol epochs share the existing directory writer, bounded by MAX_SERIES.
 // Cached/flight stamps keep their epochs alive; abandoned names can be reclaimed.
 pub(crate) type DirectoryVersions =
     BTreeMap<(kline_core::Market, kline_core::Interval, String), std::sync::Weak<AtomicU64>>;
 #[derive(Default)]
 pub(crate) struct EvidenceRuntime {
     pub(crate) catalog_writer: Mutex<DirectoryVersions>,
+    pub(crate) exposed_boundary: AtomicI64,
+    pub(crate) membership_version: Arc<AtomicU64>,
     pub(crate) directory_epoch: AtomicU64,
     pub(crate) catalog_generation: AtomicU64,
     pub(crate) directory: ArcSwap<EvidenceDirectory>,
@@ -110,6 +112,10 @@ impl EvidenceRuntime {
             );
         }
         let old = self.directory.load();
+        if !old.entries.keys().eq(view.entries.keys()) {
+            self.membership_version
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
         versions.retain(|key, version| {
             let Some(version) = version.upgrade() else {
                 return false;
