@@ -1,0 +1,36 @@
+# kp-1m evidence-mode instance for the P3-S3 rehearsal (Tokyo test VPS only; never on the 1h host).
+# Install with ../install.sh (it only prints/stages files). The binary and its config are versioned
+# together under /opt/kp-1m/evidence/<release>/ and /etc/kp-1m/evidence/<release>.json; `current`
+# symlinks select the pair. Roll back both together (0.4.24 rejects the `evidence` field).
+[Unit]
+Description=kp-1m kline-proxy evidence mode (P3-S3 rehearsal)
+After=network-online.target kp-1m-passthrough.service
+Wants=network-online.target
+Requires=kp-1m-passthrough.service
+
+[Service]
+Type=simple
+User=kp1m
+Group=kp1m
+WorkingDirectory=/var/lib/kp-1m-evidence
+ExecStartPre=/opt/kp-1m/evidence/current/kline-proxy --check-config /etc/kp-1m/evidence/current.json
+ExecStart=/opt/kp-1m/evidence/current/kline-proxy /etc/kp-1m/evidence/current.json
+Environment=RUST_LOG=info
+Environment=KLINE_IO_WORKERS=2
+Restart=on-failure
+# Restarts share the five-minute WS connect allowance recorded in the state directory.
+RestartSec=30
+TimeoutStopSec=90
+LimitNOFILE=65536
+# Design v8 section 6: budget < 0.8 GB, hard ceiling 1.4G on a 1.9 GiB host.
+MemoryMax=1.4G
+MemorySwapMax=0
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/kp-1m-evidence
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

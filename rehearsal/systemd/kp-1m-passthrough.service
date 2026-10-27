@@ -1,0 +1,25 @@
+# REST/WS passthrough with injection hooks in front of kp-1m (loopback listeners only).
+[Unit]
+Description=kp-1m rehearsal passthrough proxy (REST+WS relay, injection hooks)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kp1m
+Group=kp1m
+ExecStart=/usr/bin/python3 -I /opt/kp-1m/rehearsal/passthrough.py --log-dir /var/lib/kp-1m-o7/px \
+  --rest-upstream https://fapi.binance.com --ws-upstream wss://fstream.binance.com \
+  --rest-listen 127.0.0.1:18980 --ws-listen 127.0.0.1:18981 --control-listen 127.0.0.1:18982
+Restart=on-failure
+RestartSec=5
+MemoryMax=300M
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/kp-1m-o7
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target
