@@ -1,0 +1,8 @@
+{"added":1,"changed":true,"event":"discover","removed":0,"t":0}
+{"bars":0,"corrupt":0,"event":"restore","series":0,"t":0}
+{"event":"boot","series":1,"t":0}
+{"event":"ws_disconnect","t":8500}
+{"event":"ws_connect","t":8500}
+{"event":"ws_disconnect","t":72000}
+{"event":"ws_connect","t":72000}
+{"event":"shutdown","t":80500}

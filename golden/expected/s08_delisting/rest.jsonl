@@ -1,0 +1,12 @@
+{"path":"/fapi/v1/exchangeInfo","query":{},"reply":"exchangeInfo [\"BTCUSDT\",\"ETHUSDT\",\"SOLUSDT\"]","t":0}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793008820000","interval":"1m","limit":"60","symbol":"BTCUSDT"},"reply":"rows 60 [1793005260000..1793008800000] delay 0","t":0}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793008820000","interval":"1m","limit":"60","symbol":"ETHUSDT"},"reply":"rows 60 [1793005260000..1793008800000] delay 0","t":0}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793008820000","interval":"1m","limit":"60","symbol":"SOLUSDT"},"reply":"rows 60 [1793005260000..1793008800000] delay 0","t":0}
+{"path":"/fapi/v1/exchangeInfo","query":{},"reply":"exchangeInfo [\"BTCUSDT\",\"ETHUSDT\",\"SOLUSDT\"]","t":95000}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793008915250","interval":"1m","limit":"60","startTime":"1793005320000","symbol":"BTCUSDT"},"reply":"rows 60 [1793005320000..1793008860000] delay 0","t":95250}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793008915250","interval":"1m","limit":"60","startTime":"1793005320000","symbol":"ETHUSDT"},"reply":"rows 60 [1793005320000..1793008860000] delay 0","t":95250}
+{"path":"/fapi/v1/exchangeInfo","query":{},"reply":"exchangeInfo [\"BTCUSDT\",\"SOLUSDT\"]","t":185000}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793009005250","interval":"1m","limit":"60","startTime":"1793005440000","symbol":"BTCUSDT"},"reply":"rows 60 [1793005440000..1793008980000] delay 0","t":185250}
+{"path":"/fapi/v1/exchangeInfo","query":{},"reply":"exchangeInfo [\"BTCUSDT\",\"SOLUSDT\"]","t":245000}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793009065250","interval":"1m","limit":"60","startTime":"1793005500000","symbol":"BTCUSDT"},"reply":"rows 60 [1793005500000..1793009040000] delay 0","t":245250}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793009065250","interval":"1m","limit":"63","startTime":"1793005345250","symbol":"SOLUSDT"},"reply":"rows 62 [1793005380000..1793009040000] delay 0","t":245250}

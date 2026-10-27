@@ -1,0 +1,3 @@
+{"path":"/fapi/v1/exchangeInfo","query":{},"reply":"exchangeInfo [\"BTCUSDT\",\"ETHUSDT\",\"SOLUSDT\"]","t":0}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793008820000","interval":"1m","limit":"60","symbol":"BTCUSDT"},"reply":"rows 60 [1793005260000..1793008800000] delay 0","t":0}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793008820000","interval":"1m","limit":"60","symbol":"ETHUSDT"},"reply":"rows 60 [1793005260000..1793008800000] delay 0","t":0}

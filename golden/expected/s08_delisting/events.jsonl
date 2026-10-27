@@ -1,0 +1,7 @@
+{"added":3,"changed":true,"event":"discover","removed":0,"t":0}
+{"bars":0,"corrupt":0,"event":"restore","series":0,"t":0}
+{"event":"boot","series":3,"t":0}
+{"added":0,"changed":true,"event":"directory_refresh","removed":1,"t":95000}
+{"added":0,"changed":true,"event":"directory_refresh","removed":1,"t":185000}
+{"added":0,"changed":true,"event":"directory_refresh","removed":0,"t":245000}
+{"event":"shutdown","t":255000}
