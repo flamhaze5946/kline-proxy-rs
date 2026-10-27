@@ -11,7 +11,7 @@ use std::{
 };
 use tokio::sync::{OnceCell, OwnedSemaphorePermit, Semaphore};
 
-#[derive(Clone, Hash, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct Key {
     pub market: Market,
     pub interval: Interval,
@@ -20,6 +20,11 @@ pub(crate) struct Key {
     pub ids: Arc<[usize]>,
     pub boundary: i64,
     pub revision: u64,
+}
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct CacheKey {
+    base: Key,
+    evidence: Option<Arc<[String]>>,
 }
 struct Ready {
     at: Instant,
@@ -40,8 +45,8 @@ struct FlightEntry {
 }
 #[derive(Default)]
 struct State {
-    ready: HashMap<Key, Ready>,
-    flights: HashMap<Key, FlightEntry>,
+    ready: HashMap<CacheKey, Ready>,
+    flights: HashMap<CacheKey, FlightEntry>,
     bytes: usize,
 }
 /// Bounds on distinct in-flight keys. A new key that finds every slot taken waits in a
@@ -69,7 +74,7 @@ pub(crate) enum Lookup<'a> {
 }
 pub(crate) struct Registration<'a> {
     cache: &'a Cache,
-    key: Key,
+    key: CacheKey,
     pub cell: Arc<Flight>,
     pub payload: Option<Arc<crate::bulk::Payload>>,
     pub final_deadline: tokio::time::Instant,
@@ -152,6 +157,62 @@ impl Cache {
         slot: Option<OwnedSemaphorePermit>,
         final_deadline: tokio::time::Instant,
     ) -> Result<Lookup<'_>, ServiceError> {
+        self.get_identified(key, None, current, slot, final_deadline)
+    }
+    pub(crate) fn get_evidence(
+        &self,
+        key: Key,
+        symbols: Arc<[String]>,
+        current: impl Fn(&BulkReply) -> bool,
+        slot: Option<OwnedSemaphorePermit>,
+        deadline: tokio::time::Instant,
+    ) -> Result<Lookup<'_>, ServiceError> {
+        self.get_identified(key, Some(symbols), current, slot, deadline)
+    }
+    fn get_identified(
+        &self,
+        key: Key,
+        evidence: Option<Arc<[String]>>,
+        current: impl Fn(&BulkReply) -> bool,
+        slot: Option<OwnedSemaphorePermit>,
+        final_deadline: tokio::time::Instant,
+    ) -> Result<Lookup<'_>, ServiceError> {
+        let key = CacheKey {
+            base: key,
+            evidence,
+        };
+        // Evidence validation happens outside the global cache mutex. Recheck
+        // only those exact Arc candidates once the mutex is reacquired.
+        let validations = key.evidence.as_ref().map(|_| {
+            let candidates = {
+                let state = self.state.lock();
+                state
+                    .ready
+                    .get(&key)
+                    .map(|r| r.reply.clone())
+                    .into_iter()
+                    .chain(state.flights.get(&key).and_then(|e| e.cell.get()).cloned())
+                    .collect::<Vec<_>>()
+            };
+            candidates
+                .into_iter()
+                .map(|reply| {
+                    let valid = current(&reply);
+                    (reply, valid)
+                })
+                .collect::<Vec<_>>()
+        });
+        let current = |reply: &BulkReply| {
+            validations.as_ref().map_or_else(
+                || current(reply),
+                |checks| {
+                    checks
+                        .iter()
+                        .find(|(r, _)| std::ptr::eq(r.as_ref(), reply))
+                        .is_some_and(|(_, valid)| *valid)
+                },
+            )
+        };
         let mut state = self.state.lock();
         if let Some(cached) = state.ready.get(&key)
             && cached.at.elapsed() < Duration::from_secs(1)
@@ -211,12 +272,22 @@ impl Cache {
         }))
     }
     pub fn put(&self, key: Key, reply: Arc<BulkReply>) {
+        self.put_identified(key, None, reply);
+    }
+    pub(crate) fn put_evidence(&self, key: Key, symbols: Arc<[String]>, reply: Arc<BulkReply>) {
+        self.put_identified(key, Some(symbols), reply);
+    }
+    fn put_identified(&self, key: Key, evidence: Option<Arc<[String]>>, reply: Arc<BulkReply>) {
         if !reply.finalized
-            || (key.closed_only && reply.payload.is_none())
+            || (key.closed_only && reply.payload.is_none() && reply.evidence_stamp.is_none())
             || reply.cache_bytes() > self.max_bytes
         {
             return;
         }
+        let key = CacheKey {
+            base: key,
+            evidence,
+        };
         let mut state = self.state.lock();
         if let Some(old) = state.ready.remove(&key) {
             state.bytes -= old.reply.cache_bytes();
@@ -440,5 +511,28 @@ mod tests {
         drop(other);
         assert_eq!((cache.sizes().1, cache.holders()), (0, 0));
         assert_eq!(cache.slots.available_permits(), 1);
+    }
+    #[test]
+    fn fix2_evidence_current_callback_runs_outside_the_global_cache_mutex() {
+        let cache = cache(1);
+        let key = Key {
+            closed_only: false,
+            ..key()
+        };
+        let symbols: Arc<[String]> = Arc::from(["BTCUSDT".into()]);
+        cache.put_evidence(key.clone(), symbols.clone(), Arc::new(BulkReply::empty()));
+        assert!(matches!(
+            cache.get_evidence(
+                key,
+                symbols,
+                |_| {
+                    assert!(cache.state.try_lock().is_some());
+                    true
+                },
+                None,
+                tokio::time::Instant::now()
+            ),
+            Ok(Lookup::Ready(_))
+        ));
     }
 }

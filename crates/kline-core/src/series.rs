@@ -1,6 +1,7 @@
+use crate::evidence::{EvidenceRecord, EvidenceState, EvidenceUpdate, decimal_equal, validate_bar};
 use crate::{Bar, Interval, InvalidBar};
 use chrono::{Months, TimeZone, Utc};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::NonZeroUsize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +30,10 @@ pub struct Commit {
     pub final_revised: bool,
     pub stream_final_observed: bool,
     pub trimmed: bool,
+    /// Evidence state/bytes changed, including deletion into an explicit gap.
+    pub evidence_changed: bool,
+    pub evidence_conflict: bool,
+    pub breaker_conflict: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -52,6 +57,9 @@ struct Entry {
     bar: Bar,
     final_bar: bool,
     version: Option<Version>,
+    evidence: EvidenceState,
+    ws_equal: bool,
+    synthetic: bool,
 }
 
 /// A bounded sorted ring. Updating/appending the latest bar is O(1); corrections
@@ -60,6 +68,11 @@ struct Entry {
 pub struct Series {
     entries: VecDeque<Entry>,
     capacity: usize,
+    evidence_enabled: bool,
+    absent: BTreeSet<i64>,
+    evidence_changes: BTreeMap<i64, u64>,
+    evidence_revision: u64,
+    evidence_epoch: u64,
     // Process-local evidence of x=true; REST/restore finality cannot authorize extrapolation.
     latest_stream_final_open: Option<i64>,
 }
@@ -70,19 +83,35 @@ impl Series {
             // limit independent from allocated storage, and cap every growth step.
             entries: VecDeque::new(),
             capacity: capacity.get(),
+            evidence_enabled: false,
+            absent: BTreeSet::new(),
+            evidence_changes: BTreeMap::new(),
+            evidence_revision: 0,
+            evidence_epoch: 0,
             latest_stream_final_open: None,
         }
     }
     pub fn resize(&mut self, capacity: NonZeroUsize) {
+        if self.evidence_enabled {
+            self.evidence_revision += 1;
+            self.evidence_epoch = self.evidence_revision;
+        }
         self.capacity = capacity.get();
         while self.entries.len() > self.capacity {
             self.entries.pop_front();
         }
         self.entries.shrink_to_fit();
+        self.trim_evidence();
     }
     pub fn clear(&mut self) {
         self.entries = VecDeque::new();
         self.latest_stream_final_open = None;
+        self.absent.clear();
+        self.evidence_changes.clear();
+        if self.evidence_enabled {
+            self.evidence_revision += 1;
+            self.evidence_epoch = self.evidence_revision;
+        }
     }
     fn locate(&self, time: i64) -> Result<usize, usize> {
         if let Some(last) = self.entries.back() {
@@ -282,6 +311,12 @@ impl Series {
         bars
     }
     pub fn commit(&mut self, update: Update) -> Result<Commit, InvalidBar> {
+        if self.evidence_enabled {
+            return self.commit_evidence(EvidenceUpdate::Observation(update), false);
+        }
+        self.commit_legacy(update)
+    }
+    fn commit_legacy(&mut self, update: Update) -> Result<Commit, InvalidBar> {
         update.bar.validate()?;
         let stream_final =
             (update.source == Source::Stream && update.closed).then_some(update.bar.open_time);
@@ -330,6 +365,9 @@ impl Series {
                     Entry {
                         bar: update.bar,
                         final_bar: update.closed,
+                        evidence: EvidenceState::Pending,
+                        ws_equal: false,
+                        synthetic: update.source == Source::Synthetic,
                         version: (update.source == Source::Stream).then_some(Version {
                             event_time: update.event_time,
                             sequence: update.sequence,
@@ -345,6 +383,7 @@ impl Series {
         };
         let entry = &mut self.entries[pos];
         entry.bar = update.bar;
+        entry.synthetic = update.source == Source::Synthetic;
         entry.final_bar |= update.closed;
         if update.source == Source::Stream {
             entry.version = Some(Version {
@@ -355,6 +394,324 @@ impl Series {
             entry.version = None;
         }
         result.stream_final_observed = self.observe_stream_final(stream_final);
+        Ok(result)
+    }
+
+    /// Enabled before publication. Snapshot rows remain unconfirmed.
+    pub fn enable_evidence(&mut self) {
+        if self.evidence_enabled {
+            return;
+        }
+        self.evidence_enabled = true;
+        for entry in &mut self.entries {
+            entry.final_bar = false;
+            entry.evidence = EvidenceState::Pending;
+            entry.ws_equal = false;
+        }
+    }
+    pub fn evidence_record(&self, open: i64) -> EvidenceRecord {
+        if let Ok(i) = self.locate(open) {
+            let e = &self.entries[i];
+            EvidenceRecord {
+                open_time: open,
+                bar: Some(e.bar.clone()),
+                state: e.evidence,
+                ws_equal: e.ws_equal,
+                synthetic: e.synthetic,
+            }
+        } else {
+            EvidenceRecord {
+                open_time: open,
+                bar: None,
+                state: if self.absent.contains(&open) {
+                    EvidenceState::Absent
+                } else {
+                    EvidenceState::Empty
+                },
+                ws_equal: false,
+                synthetic: false,
+            }
+        }
+    }
+    pub fn covered_from(&self) -> Option<i64> {
+        self.entries
+            .front()
+            .map(|e| e.bar.open_time)
+            .into_iter()
+            .chain(self.absent.first().copied())
+            .min()
+    }
+    pub fn needs_verdict(&self, open: i64, trusted: bool) -> bool {
+        if self.covered_from().is_some_and(|first| open < first) {
+            return false;
+        }
+        self.evidence_state(open).needs_verdict(trusted)
+    }
+    pub fn evidence_state(&self, open: i64) -> EvidenceState {
+        match self.locate(open) {
+            Ok(i) => self.entries[i].evidence,
+            Err(_) if self.absent.contains(&open) => EvidenceState::Absent,
+            Err(_) => EvidenceState::Empty,
+        }
+    }
+    pub fn earliest_needs_verdict(&self, first: i64, last: i64, trusted: bool) -> Option<i64> {
+        (first..=last)
+            .step_by(60_000)
+            .find(|&open| self.needs_verdict(open, trusted))
+    }
+    /// Rows and gap markers share the series lock and the same minute retention.
+    fn trim_evidence(&mut self) -> bool {
+        if !self.evidence_enabled {
+            return false;
+        }
+        let latest = self
+            .entries
+            .back()
+            .map(|e| e.bar.open_time)
+            .into_iter()
+            .chain(self.absent.last().copied())
+            .max();
+        let Some(latest) = latest else {
+            return false;
+        };
+        let first =
+            latest.saturating_sub((self.capacity.saturating_sub(1) as i64).saturating_mul(60_000));
+        let before = self.entries.len() + self.absent.len();
+        while self
+            .entries
+            .front()
+            .is_some_and(|e| e.bar.open_time < first)
+        {
+            self.entries.pop_front();
+        }
+        self.absent = self.absent.split_off(&first);
+        before != self.entries.len() + self.absent.len()
+    }
+    /// A fixed-window token excludes ordinary updates outside that window.
+    pub fn evidence_window_stamp(&self, first: i64, last: i64) -> (Option<i64>, u64, u64) {
+        (
+            self.covered_from(),
+            self.evidence_epoch,
+            self.evidence_changes
+                .range(first..=last)
+                .map(|(_, v)| *v)
+                .max()
+                .unwrap_or(0),
+        )
+    }
+    pub fn commit_evidence(
+        &mut self,
+        input: EvidenceUpdate,
+        trading: bool,
+    ) -> Result<Commit, InvalidBar> {
+        let open = input.open_time();
+        let result = self.commit_evidence_inner(input, trading)?;
+        if result.evidence_changed {
+            self.evidence_revision += 1;
+            self.evidence_changes.insert(open, self.evidence_revision);
+            let latest = self
+                .entries
+                .back()
+                .map(|e| e.bar.open_time)
+                .into_iter()
+                .chain(self.absent.last().copied())
+                .max()
+                .unwrap_or(open);
+            let floor = latest.saturating_sub((self.capacity.saturating_sub(1) as i64) * 60_000);
+            self.evidence_changes = self.evidence_changes.split_off(&floor);
+        }
+        Ok(result)
+    }
+    fn commit_evidence_inner(
+        &mut self,
+        input: EvidenceUpdate,
+        trading: bool,
+    ) -> Result<Commit, InvalidBar> {
+        use EvidenceState::*;
+        let open = input.open_time();
+        if open < 0 || open % 60_000 != 0 {
+            return Err(InvalidBar::Time);
+        }
+        if let Some(bar) = input.bar() {
+            validate_bar(bar)?;
+        }
+        let latest = self
+            .entries
+            .back()
+            .map(|e| e.bar.open_time)
+            .into_iter()
+            .chain(self.absent.last().copied())
+            .max();
+        if latest.is_some_and(|latest| {
+            open < latest
+                .saturating_sub((self.capacity.saturating_sub(1) as i64).saturating_mul(60_000))
+        }) {
+            return Ok(Commit::default());
+        }
+        let previous = self.evidence_record(open);
+        let incoming = input.state();
+        let equal = previous
+            .bar
+            .as_ref()
+            .zip(input.bar())
+            .is_some_and(|(a, b)| decimal_equal(a, b))
+            || (previous.state == Absent && incoming == Absent);
+        let terminal = |s| matches!(s, WsFinal | RestFinal | Absent);
+        let conflict = terminal(previous.state) && terminal(incoming) && !equal;
+        let mut result = Commit {
+            evidence_conflict: conflict,
+            breaker_conflict: crate::evidence::trips_breaker(
+                trading,
+                conflict,
+                incoming,
+                previous.state,
+                previous.ws_equal,
+            ),
+            final_revised: conflict,
+            ..Commit::default()
+        };
+        match incoming {
+            Pending if terminal(previous.state) => return Ok(result),
+            Pending => {
+                let EvidenceUpdate::Observation(mut update) = input else {
+                    unreachable!()
+                };
+                // Synthetic never overwrites actual bytes, irrespective of trade count.
+                if update.source == Source::Synthetic
+                    && previous.bar.is_some()
+                    && !previous.synthetic
+                {
+                    return Ok(result);
+                }
+                update.closed = false;
+                if let Some(previous) = previous
+                    .bar
+                    .as_ref()
+                    .filter(|bar| decimal_equal(bar, &update.bar))
+                {
+                    update.bar = previous.clone();
+                }
+                result = self.commit_legacy(update)?;
+                if let Ok(i) = self.locate(open) {
+                    let e = &mut self.entries[i];
+                    e.evidence = Pending;
+                    result.evidence_changed |= e.synthetic != previous.synthetic;
+                    if result.updated {
+                        e.ws_equal = false;
+                    }
+                }
+            }
+            WsFinal if previous.state == RestFinal || previous.state == Absent => {
+                if equal && let Ok(i) = self.locate(open) {
+                    self.entries[i].ws_equal = true;
+                    result.stream_final_observed = self.observe_stream_final(Some(open));
+                }
+                return Ok(result);
+            }
+            Absent => {
+                if previous.state == Absent {
+                    return Ok(result);
+                }
+                if let Ok(i) = self.locate(open) {
+                    self.entries.remove(i);
+                }
+                self.absent.insert(open);
+                result.updated = previous.bar.is_some();
+                result.evidence_changed = true;
+            }
+            WsFinal | RestFinal => {
+                let (bar, version) = match input {
+                    EvidenceUpdate::Observation(u) => {
+                        let version = Version {
+                            event_time: u.event_time,
+                            sequence: u.sequence,
+                        };
+                        let newer = self
+                            .locate(open)
+                            .ok()
+                            .and_then(|i| self.entries[i].version)
+                            .is_none_or(|v| !v.newer_than(&u));
+                        if previous.state == WsFinal && !equal && !newer {
+                            let i = self.locate(open).unwrap();
+                            self.entries[i].evidence = Pending;
+                            self.entries[i].final_bar = false;
+                            result.evidence_changed = true;
+                            return Ok(result);
+                        }
+                        if equal
+                            && newer
+                            && let Ok(i) = self.locate(open)
+                        {
+                            // No state/byte change, but remember the newest WS
+                            // version for a subsequent conflicting WS frame.
+                            self.entries[i].version = Some(version);
+                        }
+                        (u.bar, Some(version))
+                    }
+                    EvidenceUpdate::Rest(bar) => (bar, None),
+                    EvidenceUpdate::Absent(_) => unreachable!(),
+                };
+                let next = if previous.state == WsFinal && incoming == WsFinal && !equal {
+                    Pending
+                } else {
+                    incoming
+                };
+                match self.locate(open) {
+                    Ok(i) => {
+                        let e = &mut self.entries[i];
+                        if !equal {
+                            result.close_time_changed = e.bar.close_time != bar.close_time;
+                            e.bar = bar;
+                            e.version = version;
+                            e.ws_equal = false;
+                            e.synthetic = false;
+                            result.updated = true;
+                        }
+                        if incoming == WsFinal || (previous.state == WsFinal && equal) {
+                            e.ws_equal = true;
+                        }
+                        e.evidence = next;
+                        e.synthetic = false;
+                        e.final_bar = matches!(next, WsFinal | RestFinal);
+                    }
+                    Err(mut i) => {
+                        if self.entries.len() == self.capacity {
+                            if i == 0 {
+                                return Ok(Commit::default());
+                            }
+                            self.entries.pop_front();
+                            i -= 1;
+                            result.trimmed = true;
+                        }
+                        self.reserve_next();
+                        self.entries.insert(
+                            i,
+                            Entry {
+                                bar,
+                                final_bar: true,
+                                version,
+                                evidence: next,
+                                ws_equal: incoming == WsFinal,
+                                synthetic: false,
+                            },
+                        );
+                        result.updated = true;
+                        result.inserted = true;
+                    }
+                }
+                self.absent.remove(&open);
+                result.evidence_changed = previous.state != next || result.updated;
+                result.became_final = matches!(next, WsFinal | RestFinal)
+                    && !matches!(previous.state, WsFinal | RestFinal);
+                if incoming == WsFinal {
+                    result.stream_final_observed = self.observe_stream_final(Some(open));
+                }
+            }
+            Empty => unreachable!(),
+        }
+        result.evidence_changed |= result.updated || result.inserted;
+        result.trimmed |= self.trim_evidence();
+        result.evidence_changed |= result.trimmed;
         Ok(result)
     }
 

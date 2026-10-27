@@ -1,0 +1,57 @@
+{
+  "listen": "127.0.0.1:1891",
+  "number_type": "string",
+  "final_wait_ms": 8000,
+  "bulk_admission_wait_ms": 8000,
+  "http_admission_wait_ms": 8000,
+  "bulk_pre_boundary_wait_ms": 250,
+  "evidence": {
+    "ws_trust_window_ms": 86400000,
+    "fallback_weight_per_minute": 120,
+    "not_trading_retention_min": 241
+  },
+  "subscriptions": [
+    {
+      "market": "future",
+      "interval": "1m",
+      "history_capacity": 241,
+      "symbol_capacities": {},
+      "symbol_patterns": [".*?USDT"],
+      "continuous": true
+    }
+  ],
+  "rest": {
+    "future_url": "http://127.0.0.1:18980",
+    "spot_url": "https://api.binance.com",
+    "weight_per_minute": 1200,
+    "workers": 4,
+    "latest_repair_workers": 2,
+    "reconcile_seconds": 300,
+    "retry_seconds": 10,
+    "boundary_guard_before_ms": 3000,
+    "boundary_guard_after_ms": 10000,
+    "sync_clock": true
+  },
+  "market_api": {
+    "enabled": false,
+    "metadata_refresh_seconds": 300,
+    "funding": { "enabled": false, "vision_enabled": false },
+    "statistics": { "enabled": false }
+  },
+  "websocket": {
+    "future_url": "ws://127.0.0.1:18981/market/stream",
+    "topic_stale_seconds": 120,
+    "batch_size": 200
+  },
+  "persistence": {
+    "directory": "/var/lib/kp-1m-evidence",
+    "load_on_startup": true,
+    "dump_on_shutdown": true,
+    "interval_seconds": 300,
+    "boundary_guard_before_ms": 2000,
+    "boundary_guard_after_ms": 15000,
+    "retention": [
+      { "market": "future", "interval": "1m", "max_store_count": 241, "symbol_counts": {} }
+    ]
+  }
+}

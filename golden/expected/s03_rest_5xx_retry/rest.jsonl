@@ -1,0 +1,9 @@
+{"path":"/fapi/v1/exchangeInfo","query":{},"reply":"exchangeInfo [\"BTCUSDT\",\"ETHUSDT\",\"SOLUSDT\"]","t":0}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793008820000","interval":"1m","limit":"60","symbol":"BTCUSDT"},"reply":"status 503","t":0}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793008820000","interval":"1m","limit":"60","symbol":"BTCUSDT"},"reply":"status 503","t":1000}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793008820000","interval":"1m","limit":"60","symbol":"BTCUSDT"},"reply":"status 503","t":3000}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793008833000","interval":"1m","limit":"60","symbol":"BTCUSDT"},"reply":"rows 60 [1793005260000..1793008800000] delay 0","t":13000}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793008940000","interval":"1m","limit":"60","startTime":"1793005380000","symbol":"BTCUSDT"},"reply":"status 502","t":120000}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793008940000","interval":"1m","limit":"60","startTime":"1793005380000","symbol":"BTCUSDT"},"reply":"rows 60 [1793005380000..1793008920000] delay 0","t":121000}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793009000000","interval":"1m","limit":"60","startTime":"1793005440000","symbol":"BTCUSDT"},"reply":"status 429","t":180000}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793009010000","interval":"1m","limit":"60","startTime":"1793005440000","symbol":"BTCUSDT"},"reply":"rows 60 [1793005440000..1793008980000] delay 0","t":240000}

@@ -7,6 +7,8 @@ mod catalog;
 mod clock;
 pub mod connect_pacer;
 mod engine;
+pub mod evidence;
+pub mod evidence_bulk;
 pub mod http;
 pub mod http_compat;
 pub mod management;

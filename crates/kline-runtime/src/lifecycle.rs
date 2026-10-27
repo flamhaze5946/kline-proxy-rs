@@ -1,3 +1,4 @@
+mod evidence;
 use crate::{
     config::{PersistenceConfig, RestConfig, guarded},
     recovery::Recovery,
@@ -186,6 +187,12 @@ impl Health {
     }
 }
 impl Readiness for Health {
+    fn evidence_query_ready(&self) -> bool {
+        !self.stopped.load(Ordering::Acquire)
+            && self.engine.evidence_catalog_loaded()
+            && self.clock_ready()
+    }
+
     fn is_ready(&self) -> bool {
         self.ready.load(Ordering::Acquire)
             && self.clock_ready()
@@ -323,6 +330,9 @@ pub async fn reconcile(
     health: Arc<Health>,
     mut stop: watch::Receiver<bool>,
 ) {
+    if engine.evidence_enabled() {
+        return evidence::reconcile(engine, api, config, health, stop).await;
+    }
     let recovery = Arc::new(Recovery {
         engine: engine.clone(),
         api,
@@ -597,14 +607,24 @@ pub async fn sync_clock(
     api: Arc<RestApi>,
     clock: Arc<SyncedClock>,
     market: Market,
-    mut stop: watch::Receiver<bool>,
+    stop: watch::Receiver<bool>,
 ) {
+    sync_clock_with_evidence(api, clock, market, stop, false).await;
+}
+pub async fn sync_clock_with_evidence(
+    api: Arc<RestApi>,
+    clock: Arc<SyncedClock>,
+    market: Market,
+    mut stop: watch::Receiver<bool>,
+    evidence: bool,
+) {
+    let max_rtt = if evidence { 100 } else { 1000 };
     while !*stop.borrow() {
         let sample = async {
             let mut best = None;
             for _ in 0..3 {
                 let sample = api.clock_sample(market).await?;
-                if sample.elapsed_ms <= 1000
+                if sample.elapsed_ms <= max_rtt
                     && best.as_ref().is_none_or(|old: &crate::rest::ClockSample| {
                         sample.elapsed_ms < old.elapsed_ms
                     })
@@ -612,7 +632,7 @@ pub async fn sync_clock(
                     best = Some(sample);
                 }
             }
-            let sample = best.ok_or_else(|| anyhow::anyhow!("clock RTT exceeds 1000ms"))?;
+            let sample = best.ok_or_else(|| anyhow::anyhow!("clock RTT exceeds {max_rtt}ms"))?;
             let offset = sample.server_time - (sample.sent_ms + sample.elapsed_ms as i64 / 2);
             anyhow::ensure!(offset.abs() < 300_000, "clock offset exceeds 5 minutes");
             clock.offset.store(offset, Ordering::Relaxed);

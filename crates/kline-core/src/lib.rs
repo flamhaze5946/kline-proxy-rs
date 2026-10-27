@@ -1,4 +1,5 @@
 //! Domain rules only: no JSON, network, clock, async runtime, or shared locks.
+pub mod evidence;
 mod series;
 pub use series::{Commit, Series, Source, Update};
 mod numbers;

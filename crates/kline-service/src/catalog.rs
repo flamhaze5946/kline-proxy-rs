@@ -28,7 +28,13 @@ pub struct Slot {
     pub symbol: Arc<str>,
     pub interval: Interval,
     trading: AtomicBool,
+    rest_gate: Arc<tokio::sync::Mutex<()>>,
+    last_rest_request_ms: AtomicI64,
+    not_trading_since: AtomicI64,
     tracked: AtomicBool,
+    pub(crate) tracking_generation: AtomicU64,
+    pub(crate) evidence_lifecycle: Mutex<()>,
+    pub(crate) closed_version: AtomicU64,
     pub last_stream_ms: AtomicI64,
     pub(crate) state: RwLock<Series>,
     pub(crate) changed: watch::Sender<u64>,
@@ -39,6 +45,31 @@ pub struct Slot {
     pub(crate) recheck_generation: AtomicU64,
 }
 impl Slot {
+    pub fn tracking_generation(&self) -> u64 {
+        self.tracking_generation.load(Ordering::Acquire)
+    }
+    /// Recovery holds this from limiter admission through evidence publication.
+    pub fn rest_gate(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.rest_gate.clone()
+    }
+    pub fn last_rest_request_ms(&self) -> i64 {
+        self.last_rest_request_ms.load(Ordering::Acquire)
+    }
+    pub fn mark_rest_request(&self, now: i64) {
+        self.last_rest_request_ms.store(now, Ordering::Release);
+    }
+    pub fn not_trading_since(&self) -> Option<i64> {
+        let n = self.not_trading_since.load(Ordering::Acquire);
+        (n >= 0).then_some(n)
+    }
+    pub fn set_not_trading_since(&self, since: Option<i64>) {
+        self.not_trading_since
+            .store(since.unwrap_or(-1), Ordering::Release);
+    }
+    pub fn evidence_record(&self, open: i64) -> kline_core::evidence::EvidenceRecord {
+        self.state.read().evidence_record(open)
+    }
+
     pub fn is_trading(&self) -> bool {
         self.trading.load(Ordering::Acquire)
     }
@@ -169,6 +200,8 @@ impl Slot {
         }
     }
 }
+pub(crate) const MAX_SERIES: usize = 100_000;
+
 type SymbolIndex = HashMap<(Market, Interval), HashMap<String, usize>>;
 type ContinuousIndex = HashMap<Interval, HashMap<String, HashMap<String, usize>>>;
 pub struct CatalogView {
@@ -184,9 +217,15 @@ impl Deref for CatalogView {
         &self.slots
     }
 }
+#[cfg(test)]
+type WithdrawalLockProbe = Arc<dyn Fn(bool) + Send + Sync>;
 pub struct Catalog {
+    evidence_enabled: AtomicBool,
+    pub(crate) published_generation: AtomicU64,
     view: ArcSwap<CatalogView>,
     writer: Mutex<()>,
+    #[cfg(test)]
+    pub(crate) withdrawal_lock_probe: Mutex<Option<WithdrawalLockProbe>>,
 }
 #[derive(Debug, Default)]
 pub struct CatalogChange {
@@ -197,6 +236,8 @@ pub struct CatalogChange {
 impl Catalog {
     pub fn new(instruments: Vec<Instrument>) -> Result<Self, String> {
         let catalog = Self {
+            evidence_enabled: AtomicBool::new(false),
+            published_generation: AtomicU64::new(0),
             view: ArcSwap::from_pointee(CatalogView {
                 slots: vec![],
                 symbols: HashMap::new(),
@@ -205,9 +246,20 @@ impl Catalog {
                 generation: 0,
             }),
             writer: Mutex::new(()),
+            #[cfg(test)]
+            withdrawal_lock_probe: Mutex::new(None),
         };
         catalog.sync(instruments)?;
         Ok(catalog)
+    }
+    pub(crate) fn enable_evidence(&self) {
+        let _writer = self.writer.lock();
+        self.evidence_enabled.store(true, Ordering::Release);
+        self.published_generation
+            .store(self.generation(), Ordering::Release);
+        for slot in self.view.load().iter() {
+            slot.state.write().enable_evidence();
+        }
     }
     pub fn sync(&self, mut instruments: Vec<Instrument>) -> Result<CatalogChange, String> {
         let _writer = self.writer.lock();
@@ -254,7 +306,7 @@ impl Catalog {
             let id = if let Some(&id) = ids.get(&key) {
                 id
             } else {
-                if slots.len() >= 100_000 {
+                if slots.len() >= MAX_SERIES {
                     return Err("directory exceeds 100000 lifetime series".into());
                 }
                 let id = slots.len();
@@ -264,9 +316,21 @@ impl Catalog {
                     symbol: i.symbol.clone().into(),
                     interval: i.interval,
                     trading: AtomicBool::new(i.trading),
+                    rest_gate: Arc::new(tokio::sync::Mutex::new(())),
+                    last_rest_request_ms: AtomicI64::new(i64::MIN),
+                    not_trading_since: AtomicI64::new(-1),
                     tracked: AtomicBool::new(true),
+                    tracking_generation: AtomicU64::new(0),
+                    evidence_lifecycle: Mutex::new(()),
+                    closed_version: AtomicU64::new(0),
                     last_stream_ms: AtomicI64::new(0),
-                    state: RwLock::new(Series::new(i.capacity)),
+                    state: RwLock::new({
+                        let mut series = Series::new(i.capacity);
+                        if self.evidence_enabled.load(Ordering::Acquire) {
+                            series.enable_evidence();
+                        }
+                        series
+                    }),
                     changed: watch::channel(0).0,
                     populated: AtomicBool::new(false),
                     durable_generation: AtomicU64::new(0),
@@ -296,9 +360,16 @@ impl Catalog {
         for i in &instruments {
             let id = symbols[&(i.market, i.interval)][&i.symbol];
             let s = &slots[id];
+            let _lifecycle = self
+                .evidence_enabled
+                .load(Ordering::Acquire)
+                .then(|| s.evidence_lifecycle.lock());
             let mut state = s.state.write();
             if state.capacity() != i.capacity.get() {
                 state.resize(i.capacity);
+                if self.evidence_enabled.load(Ordering::Acquire) {
+                    s.closed_version.fetch_add(1, Ordering::Release); // closed: resize/epoch
+                }
                 s.durable_generation.fetch_add(1, Ordering::Release);
                 s.window_generation.fetch_add(1, Ordering::Release);
             }
@@ -308,11 +379,21 @@ impl Catalog {
         }
         let mut removed = 0;
         for (id, s) in slots.iter().enumerate() {
+            let _lifecycle = self
+                .evidence_enabled
+                .load(Ordering::Acquire)
+                .then(|| self.lock_withdrawal(s, !wanted.contains(&id)));
             if !wanted.contains(&id) && s.tracked.swap(false, Ordering::AcqRel) {
                 removed += 1;
+                if self.evidence_enabled.load(Ordering::Acquire) {
+                    s.tracking_generation.fetch_add(1, Ordering::Release);
+                }
                 s.trading.store(false, Ordering::Release);
                 let mut state = s.state.write();
                 state.clear();
+                if self.evidence_enabled.load(Ordering::Acquire) {
+                    s.closed_version.fetch_add(1, Ordering::Release); // closed: clear/epoch
+                }
                 s.durable_generation.fetch_add(1, Ordering::Release);
                 s.window_generation.fetch_add(1, Ordering::Release);
                 s.populated.store(false, Ordering::Release);
@@ -326,11 +407,29 @@ impl Catalog {
             definitions: instruments,
             generation: old.generation + 1,
         }));
+        if self.evidence_enabled.load(Ordering::Acquire) {
+            self.published_generation
+                .store(old.generation + 1, Ordering::Release);
+        }
         Ok(CatalogChange {
             added,
             removed,
             changed: true,
         })
+    }
+    fn lock_withdrawal<'a>(
+        &self,
+        slot: &'a Slot,
+        withdrawing: bool,
+    ) -> parking_lot::MutexGuard<'a, ()> {
+        let _ = withdrawing;
+        let acquired = slot.evidence_lifecycle.try_lock();
+        #[cfg(test)]
+        if withdrawing && let Some(probe) = self.withdrawal_lock_probe.lock().clone() {
+            // Signal only after the real withdrawal path has attempted this lock.
+            probe(acquired.is_none());
+        }
+        acquired.unwrap_or_else(|| slot.evidence_lifecycle.lock())
     }
     pub fn slots(&self) -> Guard<Arc<CatalogView>> {
         self.view.load()

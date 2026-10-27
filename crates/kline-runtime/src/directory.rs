@@ -5,7 +5,7 @@ use crate::{
 use anyhow::{Context, Result};
 use kline_core::{Interval, Market};
 use kline_service::{
-    Engine, Instrument,
+    Clock, Engine, Instrument,
     upstream::{self, StreamStatus},
 };
 use std::{
@@ -20,6 +20,17 @@ pub async fn discover(
     config: &Config,
     metadata: &Arc<kline_market::metadata::Metadata>,
 ) -> Result<Vec<Instrument>> {
+    if config.evidence.is_some() {
+        let exchange = metadata.get(Market::Future).await?;
+        return crate::evidence_directory::merge(
+            config,
+            &exchange,
+            kline_service::SystemClock {
+                offset_ms: config.clock_offset_ms,
+            }
+            .now_ms(),
+        );
+    }
     let mut instruments: BTreeMap<_, _> = config
         .static_instruments()?
         .into_iter()
@@ -350,11 +361,14 @@ pub async fn refresh(
     metadata: Arc<kline_market::metadata::Metadata>,
     mut stop: watch::Receiver<bool>,
 ) {
-    let markets: BTreeSet<_> = config
+    let mut markets: BTreeSet<_> = config
         .subscriptions
         .iter()
         .filter_map(|s| market(&s.market).ok())
         .collect();
+    if config.evidence.is_some() {
+        markets.insert(Market::Future);
+    }
     loop {
         tokio::select! {_=stop.changed()=>break,_=tokio::time::sleep(metadata.refresh_interval())=>{}}
         let update = async {
@@ -362,9 +376,15 @@ pub async fn refresh(
                 metadata.refresh(market).await?;
             }
             let instruments = discover(&config, &metadata).await?;
-            let change = engine
-                .refresh_catalog(instruments)
-                .map_err(anyhow::Error::msg)?;
+            let change = if config.evidence.is_some() {
+                engine.refresh_catalog_with_retained(
+                    instruments,
+                    crate::evidence_state::retained_records(&config),
+                )
+            } else {
+                engine.refresh_catalog(instruments)
+            }
+            .map_err(anyhow::Error::msg)?;
             if change.changed {
                 tracing::info!(
                     added = change.added,

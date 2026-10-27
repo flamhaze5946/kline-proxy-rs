@@ -1,0 +1,7 @@
+{"path":"/fapi/v1/exchangeInfo","query":{},"reply":"exchangeInfo [\"BTCUSDT\",\"ETHUSDT\",\"SOLUSDT\"]","t":0}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793008820000","interval":"1m","limit":"60","symbol":"ETHUSDT"},"reply":"rows 60 [1793005260000..1793008800000] delay 20000","t":0}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793008820000","interval":"1m","limit":"60","symbol":"ETHUSDT"},"reply":"rows 60 [1793005260000..1793008800000] delay 20000","t":16000}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793008820000","interval":"1m","limit":"60","symbol":"ETHUSDT"},"reply":"rows 60 [1793005260000..1793008800000] delay 20000","t":33000}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793008878000","interval":"1m","limit":"60","symbol":"ETHUSDT"},"reply":"rows 60 [1793005320000..1793008860000] delay 0","t":58000}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793009000000","interval":"1m","limit":"60","startTime":"1793005440000","symbol":"ETHUSDT"},"reply":"dropped","t":180000}
+{"path":"/fapi/v1/klines","query":{"endTime":"1793009000000","interval":"1m","limit":"60","startTime":"1793005440000","symbol":"ETHUSDT"},"reply":"rows 60 [1793005440000..1793008980000] delay 14000","t":181000}

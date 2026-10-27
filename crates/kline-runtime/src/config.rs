@@ -11,6 +11,9 @@ use std::{
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub listen: String,
+    /// Presence opts this instance into the one-minute evidence contract.
+    #[serde(default)]
+    pub evidence: Option<EvidenceConfig>,
     #[serde(default = "listen_backlog_default")]
     pub listen_backlog: u32,
     #[serde(default = "number_default")]
@@ -64,6 +67,24 @@ pub struct Config {
     pub seed: Option<PathBuf>,
     pub rest: Option<RestConfig>,
     pub persistence: Option<PersistenceConfig>,
+}
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EvidenceConfig {
+    #[serde(skip)]
+    pub runtime: std::sync::Arc<parking_lot::Mutex<crate::evidence_state::RetentionRuntime>>,
+    /// Explicit milliseconds; the deployment default is 1440 minutes.
+    pub ws_trust_window_ms: u64,
+    #[serde(default = "fallback_budget_default")]
+    pub fallback_weight_per_minute: u32,
+    #[serde(default = "retention_minutes_default")]
+    pub not_trading_retention_min: u64,
+}
+fn fallback_budget_default() -> u32 {
+    120
+}
+fn retention_minutes_default() -> u64 {
+    241
 }
 fn listen_backlog_default() -> u32 {
     1024
@@ -225,7 +246,21 @@ impl Config {
         }))
     }
     pub fn load(path: &Path) -> Result<Self> {
-        let mut config: Self = serde_json::from_slice(&std::fs::read(path)?)?;
+        let raw = std::fs::read(path)?;
+        let mut config: Self = serde_json::from_slice(&raw)?;
+        if config.evidence.is_some() {
+            let raw: serde_json::Value = serde_json::from_slice(&raw)?;
+            anyhow::ensure!(
+                raw["rest"].get("latest_repair_workers").is_some(),
+                "evidence requires explicit rest.latest_repair_workers"
+            );
+            for field in ["boundary_guard_before_ms", "boundary_guard_after_ms"] {
+                anyhow::ensure!(
+                    raw["persistence"].get(field).is_some(),
+                    "evidence requires explicit persistence.{field}"
+                );
+            }
+        }
         let base = path.parent().unwrap_or(Path::new("."));
         if let Some(seed) = &mut config.seed {
             *seed = base.join(&*seed);
@@ -241,6 +276,13 @@ impl Config {
     /// Engine settings from this configuration; admission waits fall back to final_wait_ms.
     pub fn engine_settings(&self) -> Result<kline_service::Settings> {
         Ok(kline_service::Settings {
+            evidence: self
+                .evidence
+                .as_ref()
+                .map(|e| kline_service::evidence::EvidenceSettings {
+                    ws_trust_window_ms: e.ws_trust_window_ms,
+                    fallback_weight_per_minute: e.fallback_weight_per_minute,
+                }),
             final_wait_ms: self.final_wait_ms,
             inflight_limit: self.bulk_inflight_limit,
             admission_queue: self.bulk_admission_queue,
@@ -261,6 +303,70 @@ impl Config {
         })
     }
     pub fn catalog(&self) -> Result<Catalog> {
+        if let Some(evidence) = &self.evidence {
+            anyhow::ensure!(
+                self.number_type == "string",
+                "evidence requires number_type=string"
+            );
+            anyhow::ensure!(
+                evidence.ws_trust_window_ms >= 60_000
+                    && evidence.ws_trust_window_ms <= i64::MAX as u64,
+                "evidence ws_trust_window_ms must be >= 60000"
+            );
+            anyhow::ensure!(
+                (1..=1200).contains(&evidence.fallback_weight_per_minute),
+                "invalid evidence fallback budget"
+            );
+            anyhow::ensure!(
+                evidence.not_trading_retention_min > 0
+                    && evidence.not_trading_retention_min <= i64::MAX as u64 / 60_000,
+                "invalid evidence retention"
+            );
+            anyhow::ensure!(
+                self.rest.is_some() && self.persistence.is_some(),
+                "evidence requires REST and persistence"
+            );
+            anyhow::ensure!(
+                self.bulk_admission_wait_ms.is_some()
+                    && self.http_admission_wait_ms.is_some()
+                    && self.bulk_pre_boundary_wait_ms.is_some()
+                    && self.final_wait_ms > 0,
+                "evidence requires explicit admission waits and nonzero final_wait_ms"
+            );
+            anyhow::ensure!(
+                !self.subscriptions.is_empty() || !self.instruments.is_empty(),
+                "evidence requires one-minute instruments"
+            );
+            for sub in &self.subscriptions {
+                anyhow::ensure!(
+                    sub.market == "future" && sub.interval == "1m" && sub.continuous,
+                    "evidence requires futures continuous 1m subscriptions"
+                );
+                anyhow::ensure!(
+                    sub.history_capacity == 241
+                        && sub.symbol_capacities.values().all(|&n| n == 241),
+                    "evidence retains 241 minutes"
+                );
+            }
+            for instrument in &self.instruments {
+                anyhow::ensure!(
+                    instrument.market == "future"
+                        && instrument.intervals.iter().all(|i| i == "1m")
+                        && instrument.pair.is_some()
+                        && instrument.contract_type.is_some(),
+                    "evidence requires futures continuous 1m instruments"
+                );
+                anyhow::ensure!(
+                    instrument
+                        .history_capacities
+                        .get("1m")
+                        .copied()
+                        .unwrap_or(self.history_capacity)
+                        == 241,
+                    "evidence retains 241 minutes"
+                );
+            }
+        }
         anyhow::ensure!(
             (1..=i32::MAX as u32).contains(&self.listen_backlog),
             "listen_backlog must be 1..2147483647 (also capped by the operating system)"
@@ -548,7 +654,7 @@ fn validate_guard(before: u64, after: u64, minimum: u64) -> Result<()> {
     );
     Ok(())
 }
-fn validate_symbol(value: &str) -> Result<()> {
+pub(crate) fn validate_symbol(value: &str) -> Result<()> {
     anyhow::ensure!(
         !value.is_empty()
             && value.len() <= 128

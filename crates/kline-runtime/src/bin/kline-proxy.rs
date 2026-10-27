@@ -35,12 +35,22 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let check = path == "--check-config";
-    let path = if check {
+    let reset = path == "--reset-breaker";
+    let path = if check || reset {
         args.next().context("missing configuration file")?
     } else {
         path
     };
     let config = Arc::new(Config::load(Path::new(&path))?);
+    if reset {
+        config.catalog()?;
+        let state = kline_runtime::evidence_state::reset_breaker(&config)?;
+        println!(
+            "breaker reset offline; revised_total={}",
+            state.revised_total
+        );
+        return Ok(());
+    }
     if check {
         config.catalog()?;
         println!(
@@ -67,6 +77,13 @@ fn main() -> Result<()> {
 }
 
 async fn serve(config: Arc<Config>, engine: Arc<Engine>, clock: Arc<SyncedClock>) -> Result<()> {
+    let state_directory = if config.evidence.is_some() {
+        Some(kline_runtime::evidence_state::StateDirectory::load(
+            &config, &engine,
+        )?)
+    } else {
+        None
+    };
     let rest = config.rest.clone().unwrap_or_default();
     let api = RestApi::new_with_type(
         &rest.spot_url,
@@ -77,11 +94,17 @@ async fn serve(config: Arc<Config>, engine: Arc<Engine>, clock: Arc<SyncedClock>
     let app = App::new(engine.clone(), api.clone(), config.market_api.clone());
     app.tickers
         .set_price_intervals(config.ticker_price_intervals()?);
-    if !config.subscriptions.is_empty() {
+    if !config.subscriptions.is_empty() || config.evidence.is_some() {
         let definitions = directory::discover(&config, &app.metadata).await?;
-        engine
-            .refresh_catalog(definitions)
-            .map_err(anyhow::Error::msg)?;
+        if config.evidence.is_some() {
+            engine.refresh_catalog_with_retained(
+                definitions,
+                kline_runtime::evidence_state::retained_records(&config),
+            )
+        } else {
+            engine.refresh_catalog(definitions)
+        }
+        .map_err(anyhow::Error::msg)?;
     }
     // Discovery precedes restore so newly discovered symbols can import Java snapshots too.
     let store = if let Some(persistence) = config.persistence.clone() {
@@ -122,7 +145,7 @@ async fn serve(config: Arc<Config>, engine: Arc<Engine>, clock: Arc<SyncedClock>
             health.clone(),
             stop_rx.clone(),
         )));
-        if !config.subscriptions.is_empty() {
+        if !config.subscriptions.is_empty() || config.evidence.is_some() {
             tasks.push(tokio::spawn(directory::refresh(
                 engine.clone(),
                 config.clone(),
@@ -141,11 +164,12 @@ async fn serve(config: Arc<Config>, engine: Arc<Engine>, clock: Arc<SyncedClock>
             } else {
                 Market::Spot
             };
-            tasks.push(tokio::spawn(lifecycle::sync_clock(
+            tasks.push(tokio::spawn(lifecycle::sync_clock_with_evidence(
                 api.clone(),
                 clock,
                 clock_market,
                 stop_rx.clone(),
+                engine.evidence_enabled(),
             )));
         }
         tasks.push(tokio::spawn(lifecycle::reconcile(
@@ -235,6 +259,14 @@ async fn serve(config: Arc<Config>, engine: Arc<Engine>, clock: Arc<SyncedClock>
             }
         }
     }));
+    let (state_finish, state_rx) = watch::channel(false);
+    let state_persister = state_directory.as_ref().map(|directory| {
+        tokio::spawn(
+            directory
+                .clone()
+                .persist(config.clone(), engine.clone(), state_rx),
+        )
+    });
     let persister = store
         .zip(config.persistence.clone())
         .map(|(store, config)| {
@@ -283,9 +315,18 @@ async fn serve(config: Arc<Config>, engine: Arc<Engine>, clock: Arc<SyncedClock>
         }
     }
     let _ = persist_tx.send(true);
-    if let Some(task) = persister {
+    let persist_result = if let Some(task) = persister {
+        task.await
+    } else {
+        Ok(())
+    };
+    let _ = state_finish.send(true);
+    if let Some(task) = state_persister {
         task.await?;
     }
+    // The stable advisory lock outlives the final snapshot and state writes.
+    drop(state_directory);
+    persist_result?;
     result?;
     if let Some(error) = task_error {
         return Err(error.into());
